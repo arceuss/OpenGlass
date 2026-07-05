@@ -7,6 +7,7 @@
 #include "dwmcoreProjection.hpp"
 #include "dcompPrivates.hpp"
 #include "CustomThemeAtlasLoader.hpp"
+#include "CaptionTextRealizer.hpp"
 
 using namespace OpenGlass;
 namespace OpenGlass::CaptionTextHandler
@@ -33,6 +34,7 @@ namespace OpenGlass::CaptionTextHandler
 		IWICBitmap** ppIBitmap
 	);
 	HRESULT MyCText_ValidateResources(uDWM::CText* This);
+	HRESULT MyCDrawImageInstruction_Create(uDWM::CBitmapSource* bitmapSource, LPCRECT lprc, PVOID* instruction);
 	HRESULT MyCText_InitializeVisualTreeClone(uDWM::CText* This, uDWM::CText* clonedVisual, UINT cloneOption);
 	HRESULT MyCText_CloneVisualTree(uDWM::CText* This, uDWM::CText** clonedVisual, bool unknown1, bool unknown2, bool unknown3);
 	HRESULT MyCText_scalar_deleting_destructor(uDWM::CText* This, BYTE flag);
@@ -66,6 +68,7 @@ namespace OpenGlass::CaptionTextHandler
 	decltype(&MyCreateBitmap) g_CreateBitmap_Org{ nullptr };
 	decltype(&MyIWICImagingFactory2_CreateBitmapFromHBITMAP) g_IWICImagingFactory2_CreateBitmapFromHBITMAP_Org{ nullptr };
 	decltype(&MyCText_ValidateResources) g_CText_ValidateResources_Org{ nullptr };
+	decltype(&MyCDrawImageInstruction_Create) g_CDrawImageInstruction_Create_Org{ nullptr };
 	decltype(&MyCText_InitializeVisualTreeClone) g_CText_InitializeVisualTreeClone_Org{ nullptr };
 	decltype(&MyCText_CloneVisualTree) g_CText_CloneVisualTree_Org{ nullptr };
 	decltype(&MyCText_scalar_deleting_destructor) g_CText_scalar_deleting_destructor_Org{ nullptr };
@@ -96,6 +99,11 @@ namespace OpenGlass::CaptionTextHandler
 	};
 	uDWM::CTopLevelWindow* g_window{ nullptr };
 
+	// coverage computed by RenderWin7CaptionText for the caption bitmap currently
+	// being validated; bound to the bitmap's resource handle when the text visual's
+	// CDrawImageInstruction is created and handed to the dwmcore-side realizer
+	std::optional<CaptionTextRealizer::CoveragePayload> g_pendingCoverage{};
+
 	bool g_isTrimmed{ false };
 	// original sizes, no glow included
 	static union
@@ -125,6 +133,10 @@ namespace OpenGlass::CaptionTextHandler
 	int g_textGlowSize{};
 	int g_textGlowIntensity{};
 	int g_centerCaption{ 0 };
+	// the display's ClearType extra-width (CGlyphRunMaker m_uExtraWidth base, Win7
+	// hardcoded display settings default 1); PrecontrastLevel (+1 for thin fonts) is
+	// added on top and the sum clamped to [0, 6]. Calibrated against Win7 captures.
+	int g_captionTextContrast{ 1 };
 	int CaptionCenterOffset(double visualWidth, double textWidth, double visualX, double parentWidth, double scale)
 	{
 		const int localOffset = std::max(
@@ -146,6 +158,291 @@ namespace OpenGlass::CaptionTextHandler
 		return std::max(parentOffset, 0);
 	}
 
+	// builds the render font Win7's CGlyphGen::SetFont produces: measure at uniform 6x
+	// scale, then keep the 1x height but adopt the 6x average character width so glyphs
+	// rasterize at 6x horizontal resolution
+	wil::unique_hfont CreateWin7ScaledFont(HDC referenceDC, HDC targetDC, LOGFONTW* captionFontInfo)
+	{
+		LOGFONTW captionFont{};
+		if (!GetObjectW(GetCurrentObject(referenceDC, OBJ_FONT), sizeof(captionFont), &captionFont))
+		{
+			return {};
+		}
+		if (captionFontInfo)
+		{
+			*captionFontInfo = captionFont;
+		}
+		LOGFONTW measureFont{ captionFont };
+		measureFont.lfHeight *= 6;
+		measureFont.lfWidth *= 6;
+		wil::unique_hfont scaledFont{ CreateFontIndirectW(&measureFont) };
+		if (!scaledFont)
+		{
+			return {};
+		}
+		const HGDIOBJ previousFont{ SelectObject(targetDC, scaledFont.get()) };
+		TEXTMETRICW textMetrics{};
+		const bool measured{ GetTextMetricsW(targetDC, &textMetrics) != FALSE };
+		SelectObject(targetDC, previousFont);
+		if (!measured)
+		{
+			return {};
+		}
+		LOGFONTW renderFontInfo{ captionFont };
+		renderFontInfo.lfWidth = textMetrics.tmAveCharWidth;
+		return wil::unique_hfont{ CreateFontIndirectW(&renderFontInfo) };
+	}
+
+	// measures the text with the 6x render font and reports the extent in output pixels,
+	// Win7-style ((right + 5) / 6, CGlyphBitmapHolder::MakeBitmap); 6x glyph advances
+	// don't scale exactly 6x, so sizing the text bitmap from the 1x measurement would
+	// spuriously ellipsize titles that actually fit
+	LONG MeasureWin7ScaledTextWidth(HDC hdc, LPCWSTR lpchText, int cchText, UINT format)
+	{
+		wil::unique_hdc measureDC{ CreateCompatibleDC(nullptr) };
+		if (!measureDC)
+		{
+			return 0;
+		}
+		const auto renderFont{ CreateWin7ScaledFont(hdc, measureDC.get(), nullptr) };
+		if (!renderFont)
+		{
+			return 0;
+		}
+		const HGDIOBJ previousFont{ SelectObject(measureDC.get(), renderFont.get()) };
+		RECT textRect{};
+		g_DrawTextW_Org(measureDC.get(), lpchText, cchText, &textRect, (format & ~(DT_END_ELLIPSIS | DT_WORD_ELLIPSIS)) | DT_CALCRECT);
+		SelectObject(measureDC.get(), previousFont);
+		return (textRect.right + 5) / 6;
+	}
+
+	// Win7-accurate caption text rasterizer, replicating CGlyphGen/CGlyphBitmapHolder (6x
+	// monochrome raster) plus dwmcore's CGlyphRunMaker coverage filter (ThickenBitmap +
+	// FilterBox box downsample) and CGammaHandler gamma correction. The compositor only
+	// honors a single alpha channel, so per-channel coverage is baked into the caption DIB
+	// (exact against the glow already in the DIB, mean coverage as the alpha over glass).
+	bool RenderWin7CaptionText(
+		HDC hdc,
+		LPCWSTR lpchText,
+		int cchText,
+		LPCRECT lprc,
+		UINT format,
+		COLORREF textColor,
+		int* result
+	)
+	{
+		BITMAP targetInfo{};
+		if (
+			!GetObjectW(GetCurrentObject(hdc, OBJ_BITMAP), sizeof(targetInfo), &targetInfo) ||
+			!targetInfo.bmBits ||
+			targetInfo.bmBitsPixel != 32
+		)
+		{
+			return false;
+		}
+		const LONG textRectWidth{ wil::rect_width(*lprc) };
+		const LONG textRectHeight{ wil::rect_height(*lprc) };
+		if (textRectWidth <= 0 || textRectHeight <= 0)
+		{
+			return false;
+		}
+
+		wil::unique_hdc maskDC{ CreateCompatibleDC(nullptr) };
+		if (!maskDC)
+		{
+			return false;
+		}
+		SetBkMode(maskDC.get(), TRANSPARENT);
+		SetTextAlign(maskDC.get(), GetTextAlign(hdc));
+		SetTextColor(maskDC.get(), RGB(255, 255, 255));
+
+		LOGFONTW captionFont{};
+		wil::unique_hfont renderFont{ CreateWin7ScaledFont(hdc, maskDC.get(), &captionFont) };
+		if (!renderFont)
+		{
+			return false;
+		}
+		const HGDIOBJ previousFont{ SelectObject(maskDC.get(), renderFont.get()) };
+		const auto fontCleanup{ wil::scope_exit([&] { SelectObject(maskDC.get(), previousFont); }) };
+
+		// CGlyphBitmapHolder::MakeBitmap: 1bpp top-down DIB, width rounded up to 32 pixels
+		const LONG scaledWidth{ textRectWidth * 6 };
+		struct
+		{
+			BITMAPINFOHEADER header;
+			RGBQUAD colors[2];
+		} maskInfo{ { sizeof(BITMAPINFOHEADER), (scaledWidth + 31) & ~31, -textRectHeight, 1, 1, BI_RGB }, { {}, { 255, 255, 255 } } };
+		void* maskBits{ nullptr };
+		wil::unique_hbitmap maskBitmap{ CreateDIBSection(maskDC.get(), reinterpret_cast<BITMAPINFO*>(&maskInfo), DIB_RGB_COLORS, &maskBits, nullptr, 0) };
+		if (!maskBitmap)
+		{
+			return false;
+		}
+		const HGDIOBJ previousBitmap{ SelectObject(maskDC.get(), maskBitmap.get()) };
+		const auto bitmapCleanup{ wil::scope_exit([&] { SelectObject(maskDC.get(), previousBitmap); }) };
+
+		// the caller measured the text with the 1x font, but 6x glyph advances don't scale
+		// exactly 6x; re-measure at 6x and only keep the ellipsis flags when the text
+		// genuinely doesn't fit, otherwise a few stray units would trim a fitting title
+		RECT measureRect{ 0, 0, scaledWidth, textRectHeight };
+		g_DrawTextW_Org(maskDC.get(), lpchText, cchText, &measureRect, (format & ~(DT_END_ELLIPSIS | DT_WORD_ELLIPSIS)) | DT_CALCRECT);
+		UINT renderFormat{ format };
+		if (measureRect.right <= scaledWidth)
+		{
+			renderFormat &= ~(DT_END_ELLIPSIS | DT_WORD_ELLIPSIS);
+		}
+
+		RECT scaledTextRect{ 0, 0, scaledWidth, textRectHeight };
+		const int textHeight{ g_DrawTextW_Org(maskDC.get(), lpchText, cchText, &scaledTextRect, renderFormat) };
+		if (!textHeight)
+		{
+			return false;
+		}
+		GdiFlush();
+
+		// exact Win7 dwmcore glyph pipeline (CGlyphRunMaker::ThickenBitmap/FilterBox +
+		// the ClearType pixel shader, recovered from the checked build). Horizontally
+		// dilate the 6x mask rightward by clamp(extraWidth + PrecontrastLevel, 0, 6)
+		// samples (ThickenBitmap), then box-downsample: each R/G/B subpixel is a
+		// 6-sample popcount stepped 2 samples apart, coverage = trunc(popcount*255/6).
+		// The shader's quadratic contrast curve (gamma index 9), with the text color's
+		// luma folded into its coefficients, maps coverage per channel in sRGB space;
+		// the per-channel over-blend below is then a plain lerp.
+		const bool thinFont
+		{
+			_wcsicmp(captionFont.lfFaceName, L"Segoe UI") == 0 ||
+			_wcsicmp(captionFont.lfFaceName, L"Meiryo") == 0
+		};
+		// PrecontrastLevel = 1 for the thin fonts Win7 special-cases
+		const LONG dilation{ std::clamp<LONG>(g_captionTextContrast + (thinFont ? 1 : 0), 0, 6) };
+
+		// FilterBox: 6-sample box per subpixel; on-screen registration calibrated
+		// against Win7 captures puts the R window at [6x-2, 6x+4)
+		constexpr LONG boxWidth{ 6 };
+
+		// CD3DRenderState::SetConstantRegisters + pixel shader 2001 (sc_gammaRatios
+		// entry 9): C1 = k1*luma + k2, C2 = k3*luma + k4, luma = (R + 2G + B)/4,
+		// out = g + 4*g*(1-g)*(C1*g + C2) on sRGB values
+		constexpr float k1{ 0.040675f }, k2{ -0.25425f }, k3{ 0.401275f }, k4{ -0.083675f };
+		const float colorLuma{ (GetRValue(textColor) + 2.f * GetGValue(textColor) + GetBValue(textColor)) / (4.f * 255.f) };
+		const float C1{ k1 * colorLuma + k2 };
+		const float C2{ k3 * colorLuma + k4 };
+		BYTE coverageTable[boxWidth + 1]{};
+		for (int popcount = 0; popcount <= boxWidth; popcount++)
+		{
+			const float g{ static_cast<float>(popcount * 255 / boxWidth) / 255.f };
+			coverageTable[popcount] = static_cast<BYTE>(std::clamp(g + 4.f * g * (1.f - g) * (C1 * g + C2), 0.f, 1.f) * 255.f + 0.5f);
+		}
+
+		// when the dwmcore-side realizer is operational, hand it the per-channel
+		// coverage instead of baking the text into the single-alpha DIB; the
+		// compositor then blends each channel against the live glass like Win7
+		const bool payloadMode
+		{
+			g_CDrawImageInstruction_Create_Org != nullptr &&
+			CaptionTextRealizer::IsAvailable()
+		};
+		CaptionTextRealizer::CoveragePayload payload{};
+		if (payloadMode)
+		{
+			payload.bitmapWidth = targetInfo.bmWidth;
+			payload.bitmapHeight = targetInfo.bmHeight;
+			payload.x = lprc->left - 1;
+			payload.y = lprc->top;
+			payload.width = textRectWidth + 2;
+			payload.height = textRectHeight;
+			payload.textColor = textColor;
+			payload.pixels.resize(static_cast<size_t>(payload.width) * payload.height * 4);
+		}
+
+		const LONG maskStride{ maskInfo.header.biWidth / 8 };
+		const auto targetBits{ static_cast<BYTE*>(targetInfo.bmBits) };
+		for (LONG y = 0; y < textRectHeight; y++)
+		{
+			const LONG targetY{ lprc->top + y };
+			if (!payloadMode && (targetY < 0 || targetY >= targetInfo.bmHeight))
+			{
+				continue;
+			}
+			const BYTE* mask{ static_cast<const BYTE*>(maskBits) + y * maskStride };
+			const auto sample = [&](LONG i) -> UINT
+			{
+				return (i < 0 || i >= scaledWidth) ? 0u : ((mask[i >> 3] >> (7 - (i & 7))) & 1u);
+			};
+			// ThickenBitmap: OR each sample with `dilation` left neighbors
+			const auto dilatedSample = [&](LONG i) -> UINT
+			{
+				for (LONG k = 0; k <= dilation; k++)
+				{
+					if (sample(i - k))
+					{
+						return 1u;
+					}
+				}
+				return 0u;
+			};
+			// FilterBox: popcount over the subpixel's box
+			const auto boxPopcount = [&](LONG start) -> UINT
+			{
+				UINT total = 0;
+				for (LONG k = 0; k < boxWidth; k++)
+				{
+					total += dilatedSample(start + k);
+				}
+				return total;
+			};
+			BYTE* targetRow{ !payloadMode ? targetBits + targetY * targetInfo.bmWidthBytes : nullptr };
+			BYTE* payloadRow{ payloadMode ? payload.pixels.data() + static_cast<size_t>(y) * payload.width * 4 : nullptr };
+			// the overlapping windows spill one pixel past the text rect on both sides
+			// (Win7 pads the alpha box likewise)
+			for (LONG x = -1; x <= textRectWidth; x++)
+			{
+				const LONG targetX{ lprc->left + x };
+				if (!payloadMode && (targetX < 0 || targetX >= targetInfo.bmWidth))
+				{
+					continue;
+				}
+				// R/G/B subpixel coverage: 6-sample boxes stepped 2 samples apart
+				const UINT alpha[3]
+				{
+					coverageTable[boxPopcount(x * 6 - 2)],
+					coverageTable[boxPopcount(x * 6)],
+					coverageTable[boxPopcount(x * 6 + 2)]
+				};
+				if (!alpha[0] && !alpha[1] && !alpha[2])
+				{
+					continue;
+				}
+				if (payloadMode)
+				{
+					// straight per-subpixel coverage for the realizer's blend; alpha is
+					// the center (green) tap like the Win7 glyph shader outputs
+					BYTE* pixel{ payloadRow + static_cast<size_t>(x + 1) * 4 };
+					pixel[0] = static_cast<BYTE>(alpha[2]);
+					pixel[1] = static_cast<BYTE>(alpha[1]);
+					pixel[2] = static_cast<BYTE>(alpha[0]);
+					pixel[3] = static_cast<BYTE>(alpha[1]);
+					continue;
+				}
+				// per-channel premultiplied over-blend (BlendMode 2: src = textColor*cov,
+				// dst *= 1 - cov, per channel); mean coverage is the single alpha the
+				// compositor later composites over the glass
+				BYTE* pixel{ targetRow + targetX * 4 };
+				const UINT meanAlpha{ (alpha[0] + alpha[1] + alpha[2] + 1u) / 3u };
+				pixel[0] = static_cast<BYTE>((GetBValue(textColor) * alpha[2] + pixel[0] * (255u - alpha[2]) + 127u) / 255u);
+				pixel[1] = static_cast<BYTE>((GetGValue(textColor) * alpha[1] + pixel[1] * (255u - alpha[1]) + 127u) / 255u);
+				pixel[2] = static_cast<BYTE>((GetRValue(textColor) * alpha[0] + pixel[2] * (255u - alpha[0]) + 127u) / 255u);
+				pixel[3] = static_cast<BYTE>(meanAlpha + (pixel[3] * (255u - meanAlpha) + 127u) / 255u);
+			}
+		}
+		if (payloadMode)
+		{
+			g_pendingCoverage.emplace(std::move(payload));
+		}
+
+		*result = textHeight;
+		return true;
+	}
 
 	void CalculateRealizedTextGlowParams(int textGlowMode);
 }
@@ -166,6 +463,7 @@ int WINAPI CaptionTextHandler::MyDrawTextW(
 
 	if ((format & DT_CALCRECT))
 	{
+		const LONG availableWidth{ wil::rect_width(*lprc) };
 		result = g_DrawTextW_Org(hdc, lpchText, cchText, lprc, format);
 
 		if ((format & DT_END_ELLIPSIS) != 0)
@@ -173,6 +471,14 @@ int WINAPI CaptionTextHandler::MyDrawTextW(
 			RECT rawTextRect{};
 			g_DrawTextW_Org(hdc, lpchText, cchText, &rawTextRect, DT_CALCRECT | DT_NOPREFIX | DT_SINGLELINE);
 			g_isTrimmed = wil::rect_width(*lprc) < wil::rect_width(rawTextRect);
+		}
+
+		// size the text bitmap from the 6x measurement like Win7 does, so the render
+		// pass fits exactly and fitting titles don't get spuriously ellipsized
+		if (const LONG scaledExtent{ MeasureWin7ScaledTextWidth(hdc, lpchText, cchText, format & ~DT_CALCRECT) };
+			scaledExtent > 0 && scaledExtent <= availableWidth)
+		{
+			lprc->right = lprc->left + scaledExtent;
 		}
 
 		return result;
@@ -340,27 +646,43 @@ int WINAPI CaptionTextHandler::MyDrawTextW(
 		}*/
 	}
 
-	wil::unique_htheme hTheme{ OpenThemeData(nullptr, L"CompositedWindow::Window") };
-	if (hTheme)
+	// glow mode 3 generates its glow inside DrawThemeTextEx, so keep that call and
+	// overdraw the Win7-accurate text on top of it; every other mode renders the text
+	// directly (with DrawThemeTextEx as fallback should the rasterizer fail)
+	const bool themeGeneratedGlow{ LOWORD(Shared::g_textGlowMode) == 3 && g_textGlowSize != 0 };
+	bool win7TextRendered{ false };
+	if (!themeGeneratedGlow)
 	{
-		THROW_IF_FAILED(
-			DrawThemeTextEx(
-				hTheme.get(),
-				hdc,
-				0,
-				0,
-				lpchText,
-				cchText,
-				format,
-				lprc,
-				&options
-			)
-		);
+		win7TextRendered = RenderWin7CaptionText(hdc, lpchText, cchText, lprc, format, options.crText, &result);
 	}
-	else
+	if (!win7TextRendered)
 	{
-		THROW_HR_IF_NULL(E_FAIL, hTheme);
-		result = g_DrawTextW_Org(hdc, lpchText, cchText, lprc, format);
+		wil::unique_htheme hTheme{ OpenThemeData(nullptr, L"CompositedWindow::Window") };
+		if (hTheme)
+		{
+			THROW_IF_FAILED(
+				DrawThemeTextEx(
+					hTheme.get(),
+					hdc,
+					0,
+					0,
+					lpchText,
+					cchText,
+					format,
+					lprc,
+					&options
+				)
+			);
+			if (themeGeneratedGlow)
+			{
+				RenderWin7CaptionText(hdc, lpchText, cchText, lprc, format, options.crText, &result);
+			}
+		}
+		else
+		{
+			THROW_HR_IF_NULL(E_FAIL, hTheme);
+			result = g_DrawTextW_Org(hdc, lpchText, cchText, lprc, format);
+		}
 	}
 
 	// override that so we can use the correct param in CDrawImageInstruction::Create
@@ -448,6 +770,25 @@ HRESULT CaptionTextHandler::MyCText_ValidateResources(uDWM::CText* This)
 
 	return hr;
 }
+HRESULT CaptionTextHandler::MyCDrawImageInstruction_Create(uDWM::CBitmapSource* bitmapSource, LPCRECT lprc, PVOID* instruction)
+{
+	const auto hr = g_CDrawImageInstruction_Create_Org(bitmapSource, lprc, instruction);
+	// the instruction created inside CText::ValidateResources right after our
+	// rasterization pass is the caption text bitmap's; bind the pending coverage
+	// to its resource handle for the dwmcore-side realizer
+	if (g_pendingCoverage)
+	{
+		if (SUCCEEDED(hr) && g_textVisual && bitmapSource)
+		{
+			if (const UINT handle{ bitmapSource->GetResourceHandle() })
+			{
+				CaptionTextRealizer::RegisterPayload(g_textVisual, handle, std::move(*g_pendingCoverage));
+			}
+		}
+		g_pendingCoverage.reset();
+	}
+	return hr;
+}
 HRESULT CaptionTextHandler::MyCText_InitializeVisualTreeClone(uDWM::CText* This, uDWM::CText* clonedVisual, UINT cloneOption)
 {
 	g_textVisualStateMap[clonedVisual] = g_textVisualStateMap[This];
@@ -465,6 +806,7 @@ HRESULT CaptionTextHandler::MyCText_CloneVisualTree(uDWM::CText* This, uDWM::CTe
 HRESULT CaptionTextHandler::MyCText_scalar_deleting_destructor(uDWM::CText* This, BYTE flag)
 {
 	g_textVisualStateMap.erase(This);
+	CaptionTextRealizer::UnregisterOwner(This);
 	return g_CText_scalar_deleting_destructor_Org(This, flag);
 }
 HRESULT CaptionTextHandler::MyCChannel_MatrixTransformUpdate(dwmcore::CChannel* This, UINT handleId, MilMatrix3x2D* matrix)
@@ -1194,6 +1536,7 @@ void CaptionTextHandler::Startup()
 		uDWM::g_projectionArray.ApplyToVariable("CText::ValidateResources", g_CText_ValidateResources_Org);
 		uDWM::g_projectionArray.ApplyToVariable("CText::InitializeVisualTreeClone", g_CText_InitializeVisualTreeClone_Org);
 		uDWM::g_projectionArray.ApplyToVariable("CText::CloneVisualTree", g_CText_CloneVisualTree_Org);
+		uDWM::g_projectionArray.ApplyToVariable("CDrawImageInstruction::Create", g_CDrawImageInstruction_Create_Org);
 
 		const auto build_before_w10_2004 = dwmcore::g_versionInfo.build < os::build_w10_2004;
 		HookHelper::PatchFunctions(
@@ -1202,7 +1545,8 @@ void CaptionTextHandler::Startup()
 				{ &g_CChannel_MatrixTransformUpdate_Org, &MyCChannel_MatrixTransformUpdate },
 				{ &g_CText_ValidateResources_Org, &MyCText_ValidateResources },
 				{ &g_CText_InitializeVisualTreeClone_Org, &MyCText_InitializeVisualTreeClone, !build_before_w10_2004 },
-				{ &g_CText_CloneVisualTree_Org, &MyCText_CloneVisualTree, build_before_w10_2004 }
+				{ &g_CText_CloneVisualTree_Org, &MyCText_CloneVisualTree, build_before_w10_2004 },
+				{ &g_CDrawImageInstruction_Create_Org, &MyCDrawImageInstruction_Create, g_CDrawImageInstruction_Create_Org != nullptr }
 			},
 			true
 		);
@@ -1296,7 +1640,8 @@ void CaptionTextHandler::Shutdown()
 				{ &g_CChannel_MatrixTransformUpdate_Org, &MyCChannel_MatrixTransformUpdate },
 				{ &g_CText_ValidateResources_Org, &MyCText_ValidateResources },
 				{ &g_CText_InitializeVisualTreeClone_Org, &MyCText_InitializeVisualTreeClone, !build_before_w10_2004 },
-				{ &g_CText_CloneVisualTree_Org, &MyCText_CloneVisualTree, build_before_w10_2004 }
+				{ &g_CText_CloneVisualTree_Org, &MyCText_CloneVisualTree, build_before_w10_2004 },
+				{ &g_CDrawImageInstruction_Create_Org, &MyCDrawImageInstruction_Create, g_CDrawImageInstruction_Create_Org != nullptr }
 			},
 			false
 		);

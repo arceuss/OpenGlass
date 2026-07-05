@@ -315,6 +315,25 @@ namespace OpenGlass::dwmcore
 		inline static PVOID* vftable{ nullptr };
 	};
 	struct CImageSource : CResource {};
+	// dwmcore-side slave resource for a uDWM CBitmapSource (caption text bitmaps
+	// resolve to this type at draw time)
+	struct CBitmapResource : CImageSource
+	{
+		inline static PVOID* vftable{ nullptr };
+	};
+	// per-channel handle table: entry = GetEntry(handle), slave object at entry + 8
+	struct CResourceTable
+	{
+		DECLSPEC_PROJECTION PVOID GetEntry(UINT handle)
+		{
+			return HANDLE_PROJECTION_FUNCTION(CResourceTable::GetEntry, this, handle);
+		}
+		DECLSPEC_PROJECTION CResource* GetResourceFromHandle(UINT handle)
+		{
+			const auto entry = GetEntry(handle);
+			return entry ? *reinterpret_cast<CResource**>(static_cast<BYTE*>(entry) + 8) : nullptr;
+		}
+	};
 	struct CImageLegacyMilBrush : CLegacyMilBrush
 	{
 		inline static PVOID* vftable{ nullptr };
@@ -900,6 +919,12 @@ namespace OpenGlass::dwmcore
 		MAKE_EMPTY_PROJECTION_TUPLE("CRenderDataBuilder::DrawGeometry", 0, 0),
 		MAKE_EMPTY_PROJECTION_TUPLE("CRenderData::TryDrawCommandAsDrawList", 0, 0),
 		MAKE_EMPTY_PROJECTION_TUPLE("CRenderData::DrawImageResource_FillMode", 0, 0),
+
+		// Win7-accurate caption text realizer (per-channel ClearType blend); verified on 19041
+		MAKE_EMPTY_PROJECTION_TUPLE("CRenderDataBuilder::DrawImage", os::build_w10_2004, os::build_server_2022),
+		MAKE_EMPTY_PROJECTION_TUPLE("CRenderData::ProcessUpdate", os::build_w10_2004, os::build_server_2022),
+		MAKE_FUNCTION_PROJECTION_TUPLE(CResourceTable::GetEntry, os::build_w10_2004, os::build_server_2022),
+		MAKE_VARIABLE_PROJECTION_TUPLE_BY_ALIAS(CBitmapResource::vftable, "CBitmapResource::`vftable'", os::build_w10_2004, os::build_server_2022),
 		MAKE_FUNCTION_PROJECTION_TUPLE(CGeometry::GetShapeData, 0, 0),
 		MAKE_VARIABLE_PROJECTION_TUPLE_BY_ALIAS(CRectangleGeometry::vftable, "CRectangleGeometry::`vftable'", 0, 0),
 		

@@ -460,7 +460,25 @@ namespace OpenGlass::uDWM
 	};
 
 	struct CImage : CVisual {};
-	struct CBitmapSource : CBaseObject {};
+	struct CBitmapSource : CBaseObject
+	{
+		// CBitmapSource -> CBitmapSourceProxy -> channel CResource -> HMIL handle;
+		// the wire handle dwmcore's resource table maps to the slave CBitmapResource
+		DECLSPEC_PROJECTION UINT GetResourceHandle() const
+		{
+			const auto proxy = *Util::PointerExecuteUnsafe<CBitmapSource_GetProxy_Offsets, Util::OffsetBy<BYTE**>>(this, g_versionInfo.build, g_versionInfo.revision);
+			if (!proxy)
+			{
+				return 0;
+			}
+			const auto resource = *Util::PointerExecuteUnsafe<CBitmapSourceProxy_GetResource_Offsets, Util::OffsetBy<BYTE**>>(proxy, g_versionInfo.build, g_versionInfo.revision);
+			if (!resource)
+			{
+				return 0;
+			}
+			return *Util::PointerExecuteUnsafe<CResourceProxy_GetHandle_Offsets, Util::OffsetBy<UINT*>>(resource, g_versionInfo.build, g_versionInfo.revision);
+		}
+	};
 	struct CBitmapSourceArray : DynArray<CBitmapSource*> {};
 
 	struct CAtlasedRectsVisual : CVisual 
@@ -775,7 +793,7 @@ namespace OpenGlass::uDWM
 		{
 			const auto& offset = GetOffset();
 
-			return offset.x == -32000 || offset.y == -32000;
+			return offset.x <= -32000 || offset.y <= -32000;
 		}
 
 		DECLSPEC_PROJECTION CWindowData* GetData() const
@@ -805,6 +823,10 @@ namespace OpenGlass::uDWM
 		DECLSPEC_PROJECTION CCanvasVisual* GetClientBlurVisual() const
 		{
 			return *Util::PointerExecuteUnsafe<CTopLevelWindow_GetClientBlurVisual_Index_Offsets, Util::OffsetBy<CCanvasVisual* const*>>(this, g_versionInfo.build, g_versionInfo.revision);
+		}
+		DECLSPEC_PROJECTION CCanvasVisual* GetNonClientVisual() const
+		{
+			return *Util::PointerExecuteUnsafe<CTopLevelWindow_GetNonClientVisual_Index_Offsets, Util::OffsetBy<CCanvasVisual* const*>>(this, g_versionInfo.build, g_versionInfo.revision);
 		}
 		DECLSPEC_PROJECTION CWindowBorder* GetWindowBorder() const
 		{
@@ -979,6 +1001,10 @@ namespace OpenGlass::uDWM
 					clonedWindow
 				);
 			}
+		}
+		DECLSPEC_PROJECTION HRESULT ApplyMaximizedClip(HRGN region)
+		{
+			return HANDLE_PROJECTION_FUNCTION(CTopLevelWindow::ApplyMaximizedClip, this, region);
 		}
 		DECLSPEC_PROJECTION bool TreatAsActiveWindow()
 		{
@@ -1329,6 +1355,8 @@ namespace OpenGlass::uDWM
 		MAKE_FUNCTION_PROJECTION_TUPLE(VisualCollection::InsertRelative, 0, 0),
 
 		MAKE_EMPTY_PROJECTION_TUPLE("CText::ValidateResources", 0, os::build_w11_22h2),
+		// Win7-accurate caption text realizer (per-channel ClearType blend); verified on 19041
+		MAKE_EMPTY_PROJECTION_TUPLE("CDrawImageInstruction::Create", os::build_w10_2004, os::build_server_2022),
 		MAKE_EMPTY_PROJECTION_TUPLE("CText::CloneVisualTree", 0, os::build_w10_2004),
 		MAKE_EMPTY_PROJECTION_TUPLE("CText::InitializeVisualTreeClone", os::build_w10_2004, os::build_w11_22h2),
 		MAKE_EMPTY_PROJECTION_TUPLE("CDWriteText::ValidateVisual", os::build_w11_22h2, 0),
@@ -1378,6 +1406,7 @@ namespace OpenGlass::uDWM
 		MAKE_VARIABLE_PROJECTION_TUPLE_BY_ALIAS(CTopLevelWindow::vftable, "CTopLevelWindow::`vftable'", 0, 0),
 		MAKE_FUNCTION_PROJECTION_TUPLE_BY_ALIAS(CTopLevelWindow::CloneVisualTreeForLivePreview_Win10, "CTopLevelWindow::CloneVisualTreeForLivePreview", 0, os::build_w11_22h2),
 		MAKE_FUNCTION_PROJECTION_TUPLE_BY_ALIAS(CTopLevelWindow::CloneVisualTreeForLivePreview_Win11, "CTopLevelWindow::CloneVisualTreeForLivePreview", os::build_w11_22h2, 0),
+		MAKE_FUNCTION_PROJECTION_TUPLE(CTopLevelWindow::ApplyMaximizedClip, 0, 0),
 		MAKE_FUNCTION_PROJECTION_TUPLE(CTopLevelWindow::GetActualWindowRect, 0, 0),
 		MAKE_FUNCTION_PROJECTION_TUPLE(CTopLevelWindow::TreatAsActiveWindow, 0, 0),
 		MAKE_FUNCTION_PROJECTION_TUPLE(CTopLevelWindow::OnBlurBehindUpdated, 0, 0),

@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Header Files">
@@ -137,6 +137,9 @@
     <ClInclude Include="CaptionTextHandler.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="CaptionTextRealizer.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="GlassEngine.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -186,6 +189,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="DxgiPrivates.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="GlassHighlightBrush.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="HighlightRealizer.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
@@ -259,6 +268,9 @@
     <ClCompile Include="CaptionTextHandler.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="CaptionTextRealizer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="GlassEngine.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -292,6 +304,12 @@
     <ClCompile Include="ServiceHandler.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="GlassHighlightBrush.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="HighlightRealizer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="AeroColorizationEffect.hlsl">
@@ -307,6 +325,12 @@
       <Filter>Shader Files</Filter>
     </FxCompile>
     <FxCompile Include="Blur.VS.hlsl">
+      <Filter>Shader Files</Filter>
+    </FxCompile>
+    <FxCompile Include="CaptionText.PS.hlsl">
+      <Filter>Shader Files</Filter>
+    </FxCompile>
+    <FxCompile Include="CaptionText.VS.hlsl">
       <Filter>Shader Files</Filter>
     </FxCompile>
   </ItemGroup>
@@ -346,6 +370,12 @@
   </ItemGroup>
   <ItemGroup>
     <Image Include="reflection.png">
+      <Filter>Image Files</Filter>
+    </Image>
+    <Image Include="highlight.png">
+      <Filter>Image Files</Filter>
+    </Image>
+    <Image Include="sidehighlight.png">
       <Filter>Image Files</Filter>
     </Image>
   </ItemGroup>

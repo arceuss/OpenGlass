@@ -197,6 +197,39 @@ namespace OpenGlass::uDWM
 		}
 	};
 
+	// CDrawImageInstruction::WriteInstruction
+	// handle = *(uint32*)(*(*(this+32) + 16) + 24) where this+32 is copied from
+	// CBitmapSource+16 in CDrawImageInstruction::Create; i.e. the chain is
+	// CBitmapSource+16 -> CBitmapSourceProxy, proxy+16 -> channel CResource,
+	// resource+24 -> DWORD HMIL handle (verified on 19041)
+	struct CBitmapSource_GetProxy_Offsets
+	{
+		consteval static auto operator()()
+		{
+			return std::array{
+				Util::OffsetInfo{ .offset = 16, .build = 0, .revision = 0 }
+			};
+		}
+	};
+	struct CBitmapSourceProxy_GetResource_Offsets
+	{
+		consteval static auto operator()()
+		{
+			return std::array{
+				Util::OffsetInfo{ .offset = 16, .build = 0, .revision = 0 }
+			};
+		}
+	};
+	struct CResourceProxy_GetHandle_Offsets
+	{
+		consteval static auto operator()()
+		{
+			return std::array{
+				Util::OffsetInfo{ .offset = 24, .build = 0, .revision = 0 }
+			};
+		}
+	};
+
 	// CText::SetRTLReading
 	struct CText_RTL_FlagByteOffset_Offsets
 	{
@@ -703,6 +736,21 @@ namespace OpenGlass::uDWM
 				Util::OffsetInfo{ .offset = 39 * sizeof(ULONG_PTR), .build = os::build_w11_22h2, .revision = 0 },
 				Util::OffsetInfo{ .offset = 42 * sizeof(ULONG_PTR), .build = os::build_w11_24h2, .revision = 0 },
 				Util::OffsetInfo{ .offset = 37 * sizeof(ULONG_PTR), .build = 0, .revision = 0 }
+			};
+		}
+	};
+	// CTopLevelWindow::UpdateNCAreaButtonVisuals
+	// xrefs to CRenderDataVisual::AddInstruction
+	struct CTopLevelWindow_GetNonClientVisual_Index_Offsets
+	{
+		consteval static auto operator()()
+		{
+			return std::array{
+				Util::OffsetInfo{ .offset = 32 * sizeof(ULONG_PTR), .build = os::build_w10_2004, .revision = 0 },
+				Util::OffsetInfo{ .offset = 33 * sizeof(ULONG_PTR), .build = os::build_w11_21h2, .revision = 0 },
+				Util::OffsetInfo{ .offset = 34 * sizeof(ULONG_PTR), .build = os::build_w11_22h2, .revision = 0 },
+				Util::OffsetInfo{ .offset = 36 * sizeof(ULONG_PTR), .build = os::build_w11_24h2, .revision = 0 },
+				Util::OffsetInfo{ .offset = 31 * sizeof(ULONG_PTR), .build = 0, .revision = 0 }
 			};
 		}
 	};

@@ -27,6 +27,10 @@ LANGUAGE LANG_NEUTRAL, SUBLANG_DEFAULT
 
 IDB_REFLECTION          PNG                     "reflection.png"
 
+IDB_HIGHLIGHT           PNG                     "highlight.png"
+
+IDB_SIDEHIGHLIGHT       PNG                     "sidehighlight.png"
+
 
 /////////////////////////////////////////////////////////////////////////////
 //
@@ -81,6 +85,10 @@ IDR_RCDATA_BLUR_PS_BLURH RCDATA                  "Blur.PS_BlurH.cso"
 IDR_RCDATA_BLUR_PS_BLURV RCDATA                  "Blur.PS_BlurV.cso"
 
 IDR_RCDATA_BLUR_PS_BLURV_VISTA RCDATA                  "Blur.PS_BlurV_Vista.cso"
+
+IDR_RCDATA_CAPTIONTEXT_VS RCDATA                  "CaptionText.VS.cso"
+
+IDR_RCDATA_CAPTIONTEXT_PS RCDATA                  "CaptionText.PS.cso"
 
 #endif    // Neutral (Default) resources
 /////////////////////////////////////////////////////////////////////////////
