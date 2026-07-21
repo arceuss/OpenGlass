@@ -288,7 +288,17 @@ namespace OpenGlass::GlassIntegrity
 	{
 		dwmcore::COcclusionContext* context;
 		ULONGLONG id;
-		std::unordered_map<dwmcore::CZOrderedRectBase*, D2D1_RECT_F> saves;
+		// The occluder array belongs to dwmcore, which can grow it (reallocating the
+		// buffer) or rebuild it between the checkpoint and the flip. Element pointers
+		// were being kept here and written through at flip time, so once the buffer
+		// moved the flip scribbled 36-byte CZOrderedRect records into whatever owned
+		// that memory next - in the captured dumps, the graphics driver's own object.
+		// Keep the array identity and indices instead, and re-verify the identity
+		// before touching anything.
+		const void* arrayData;
+		size_t arrayCount;
+		size_t elementSize;
+		std::vector<std::pair<size_t, D2D1_RECT_F>> saves;
 	};
 	std::unordered_map<dwmcore::CArrayBasedCoverageSet*, CoverageSetCheckpoint> g_coverageSetCheckpointMap;
 }
@@ -387,13 +397,16 @@ void GlassIntegrity::ShrinkOccludersAboveGlass(dwmcore::COcclusionContext* occlu
 		auto& checkpoint = g_coverageSetCheckpointMap[coverageSet];
 		checkpoint.context = occlusionContext;
 		checkpoint.id = frameId;
+		checkpoint.arrayData = views.data();
+		checkpoint.arrayCount = views.size();
+		checkpoint.elementSize = sizeof(CZOrderedRectT);
 		checkpoint.saves.clear();
 		checkpoint.saves.reserve(targetOccluderSet.size());
 		for (auto& [occluder, sides] : targetOccluderSet)
 		{
 			auto& originalRect = occluder->m_originalRect;
 
-			checkpoint.saves.emplace(const_cast<dwmcore::CZOrderedRectBase*>(reinterpret_cast<dwmcore::CZOrderedRectBase const*>(occluder)), originalRect);
+			checkpoint.saves.emplace_back(static_cast<size_t>(occluder - views.data()), originalRect);
 
 			if (sides.test(ShrinkSide_Left))
 			{
@@ -444,10 +457,40 @@ void GlassIntegrity::FlipOccludersCheckpoint(dwmcore::CArrayBasedCoverageSet* co
 		}
 
 		const auto matrix = checkpoint.context->GetDeviceTransform();
-		for (auto& [occluder, backup] : checkpoint.saves)
+		const auto flipCheckpointedOccluders = [&checkpoint, &matrix](auto&& views)
 		{
-			std::swap(occluder->GetOriginalRect(), backup);
-			occluder->UpdateDeviceRect(matrix);
+			using CZOrderedRectT = std::remove_reference_t<decltype(views)>::value_type;
+			// Indices, not pointers, are what make this safe: every write below is
+			// bounds-checked against the array as it exists RIGHT NOW, so a grown or
+			// reallocated buffer can never be written outside. dwmcore grows this
+			// array by copying elements in order, so existing indices still address
+			// the same occluders afterwards - which is why we must NOT bail out just
+			// because the buffer moved or the count changed. Doing that would skip the
+			// restore and leave dwmcore's occluders permanently shrunk.
+			if (checkpoint.elementSize != sizeof(CZOrderedRectT))
+			{
+				checkpoint.saves.clear();
+				return;
+			}
+			for (auto& [index, backup] : checkpoint.saves)
+			{
+				if (index >= views.size())
+				{
+					continue;
+				}
+				auto& occluder = views[index];
+				std::swap(occluder.m_originalRect, backup);
+				occluder.UpdateDeviceRect(matrix);
+			}
+		};
+
+		if (Util::VersionBefore<os::build_w11_24h2, os::revision_24h2_with_25h2_code_staged>(dwmcore::g_versionInfo.build, dwmcore::g_versionInfo.revision))
+		{
+			flipCheckpointedOccluders(coverageSet->GetOccluderArray()->views());
+		}
+		else
+		{
+			flipCheckpointedOccluders(coverageSet->GetOccluderArray2()->views());
 		}
 	}
 }
@@ -1238,6 +1281,7 @@ HRESULT GlassIntegrity::MyCDrawingContext_DrawVisualTree(
 
 		hr = callback(extendedPixelRectangle);
 
+		d2dContext->EnsureBeginDraw(); // refresh d2d selected target
 		LOG_IF_FAILED(This->ApplyRenderStateInternal(false)); // apply clip and other states
 		LOG_IF_FAILED(This->FlushD2D()); // flush previous draw calls
 

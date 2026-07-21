@@ -114,6 +114,9 @@ If you encounter crashes or technical bugs:
 | CustomThemeAtlas | String | Path to PNG file with theme resource (bitmap must have exactly the same layout as msstyle theme you are using!). <br><br>💡 OpenGlass also looks for a `.layout` file with the same name (e.g., `theme.png.layout`) to determine the layout of the atlas. |
 | DisableModernBorders | DWORD | Disable modern rounded window borders. <br><br><ul><li>0x0 = Enable modern borders (default)</li><li>0x1 = Disable modern borders</li></ul><br>ℹ️ Only effective in Win11 |
 
+> [!NOTE]
+> **Caption text rendering**: On builds before Windows 11 22H2, OpenGlass rasterizes window titles with a pixel-accurate recreation of the Windows 7 DWM ClearType glyph pipeline (6× horizontal oversampling, contrast dilation and the original gamma-correction curve, recovered from the Windows 7 binaries). On Windows 10 2004 – 21H2 the text is additionally composited with Windows 7's per-channel component-alpha blend against the live glass, reproducing the original subpixel color fringing down to the pixel; on other builds a single-alpha approximation is used. This is always on — there is no registry key for it (the `DisabledHooks` `0x1` bit disables the whole caption text module). The slight red/blue fringes on glyph edges are authentic ClearType subpixel rendering, not an artifact.
+
 ### Advanced settings
 
 These settings are intended for `HKLM` and should only be modified if necessary.

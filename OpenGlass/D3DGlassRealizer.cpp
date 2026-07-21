@@ -506,6 +506,45 @@ void CD3DGlassRealizer::CalculateDwmHwSamples(float sigma)
 	}
 }
 
+CBuffer2D& CD3DGlassRealizer::AcquirePooledBuffer(
+	std::unordered_map<UINT64, CPooledBuffer2D>& pool,
+	UINT width,
+	UINT height,
+	DXGI_FORMAT format,
+	UINT bindFlags,
+	bool hwProtectionEnabled
+)
+{
+	const UINT64 key =
+		(static_cast<UINT64>(width) & 0xffff) |
+		((static_cast<UINT64>(height) & 0xffff) << 16) |
+		((static_cast<UINT64>(format) & 0xff) << 32) |
+		((static_cast<UINT64>(bindFlags) & 0x3fffff) << 40) |
+		(static_cast<UINT64>(hwProtectionEnabled ? 1 : 0) << 63);
+	auto& entry = pool[key];
+	entry.lastUse = ++m_bufferUseCounter;
+
+	// bound the pool; the evicted entry hasn't been bound for many renders, so its
+	// destruction is safely distant from any in-flight driver work
+	constexpr size_t maxPooledBuffers{ 16 };
+	if (pool.size() > maxPooledBuffers)
+	{
+		auto oldest = pool.end();
+		for (auto it = pool.begin(); it != pool.end(); ++it)
+		{
+			if (it->first != key && (oldest == pool.end() || it->second.lastUse < oldest->second.lastUse))
+			{
+				oldest = it;
+			}
+		}
+		if (oldest != pool.end())
+		{
+			pool.erase(oldest);
+		}
+	}
+	return entry.buffer;
+}
+
 HRESULT CD3DGlassRealizer::Render(
 	ID3D11Device* device,
 	ID3D11DeviceContext* context,
@@ -534,8 +573,16 @@ HRESULT CD3DGlassRealizer::Render(
 		RETURN_IF_FAILED(Initialize(device));
 	}
 
+	auto& quarterResBuffer = AcquirePooledBuffer(
+		m_quarterResBuffers,
+		std::max(1u, backBufferDesc.Width >> 2),
+		std::max(1u, backBufferDesc.Height),
+		backBufferDesc.Format,
+		D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
+		hwProtectionEnabled
+	);
 	RETURN_IF_FAILED(
-		m_quarterResBuffer.Ensure(
+		quarterResBuffer.Ensure(
 			device,
 			backBufferDesc.Width >> 2,
 			backBufferDesc.Height,
@@ -544,8 +591,8 @@ HRESULT CD3DGlassRealizer::Render(
 			hwProtectionEnabled
 		)
 	);
-	RETURN_IF_FAILED(m_quarterResBuffer.EnsureRTV(device));
-	RETURN_IF_FAILED(m_quarterResBuffer.EnsureSRV(device));
+	RETURN_IF_FAILED(quarterResBuffer.EnsureRTV(device));
+	RETURN_IF_FAILED(quarterResBuffer.EnsureSRV(device));
 
 	CalculateDwmHwSamples(3.f);
 	// DWM inflates bounds by filterRadius = ceil(sigma * 2.3) (sigma=3.0 => 7)
@@ -683,8 +730,16 @@ HRESULT CD3DGlassRealizer::Render(
 	ID3D11ShaderResourceView* pass1InputSRV = backBufferSRV;
 	if (!pass1InputSRV)
 	{
+		auto& intermediateBuffer = AcquirePooledBuffer(
+			m_intermediateBuffers,
+			std::max(1u, backBufferDesc.Width),
+			std::max(1u, backBufferDesc.Height),
+			backBufferDesc.Format,
+			D3D11_BIND_SHADER_RESOURCE,
+			hwProtectionEnabled
+		);
 		RETURN_IF_FAILED(
-			m_intermediateBuffer.Ensure(
+			intermediateBuffer.Ensure(
 				device,
 				backBufferDesc.Width,
 				backBufferDesc.Height,
@@ -693,7 +748,7 @@ HRESULT CD3DGlassRealizer::Render(
 				hwProtectionEnabled
 			)
 		);
-		RETURN_IF_FAILED(m_intermediateBuffer.EnsureSRV(device));
+		RETURN_IF_FAILED(intermediateBuffer.EnsureSRV(device));
 
 		// Avoid resource binding hazards (and we will set RTVs explicitly afterwards anyway).
 		context->OMSetRenderTargets(0, nullptr, nullptr);
@@ -715,7 +770,7 @@ HRESULT CD3DGlassRealizer::Render(
 					Util::CopyTextureRegion(
 						context,
 						backBuffer,
-						m_intermediateBuffer.m_texture.get(),
+						intermediateBuffer.m_texture.get(),
 						copyRegionRect,
 						copyRegionRect.left,
 						copyRegionRect.top
@@ -729,18 +784,14 @@ HRESULT CD3DGlassRealizer::Render(
 			Util::CopyTextureRegion(
 				context,
 				backBuffer,
-				m_intermediateBuffer.m_texture.get(),
+				intermediateBuffer.m_texture.get(),
 				copyRegionRect,
 				copyRegionRect.left,
 				copyRegionRect.top
 			);
 		}
 
-		pass1InputSRV = m_intermediateBuffer.m_srv.get();
-	}
-	else
-	{
-		m_intermediateBuffer.Reset();
+		pass1InputSRV = intermediateBuffer.m_srv.get();
 	}
 
 	//----------------------------------------------------------------------------------
@@ -749,7 +800,7 @@ HRESULT CD3DGlassRealizer::Render(
 	ID3D11Buffer* vbBlur[] = { m_vertexBuffer.get() };
 	context->IASetVertexBuffers(0, 1, vbBlur, &stride, &offset);
 	context->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
-	ID3D11RenderTargetView* rtvQuarter[] = { m_quarterResBuffer.m_rtv.get() };
+	ID3D11RenderTargetView* rtvQuarter[] = { quarterResBuffer.m_rtv.get() };
 	context->OMSetRenderTargets(1, rtvQuarter, nullptr);
 
 	vp.Width = static_cast<float>(quarterWidth);
@@ -815,7 +866,7 @@ HRESULT CD3DGlassRealizer::Render(
 	{
 		context->PSSetShader(m_pixelShaderBlurV_Vista.get(), nullptr, 0);
 	}
-	ID3D11ShaderResourceView* srvsQuarter[] = { m_quarterResBuffer.m_srv.get() };
+	ID3D11ShaderResourceView* srvsQuarter[] = { quarterResBuffer.m_srv.get() };
 	context->PSSetShaderResources(0, 1, srvsQuarter);
 
 	clipRect = ToScissorRect(

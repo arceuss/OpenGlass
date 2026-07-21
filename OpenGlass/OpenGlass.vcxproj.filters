@@ -362,6 +362,12 @@
     <None Include="packages.config">
       <Filter>Misc Files</Filter>
     </None>
+    <None Include="CaptionText.PS.cso">
+      <Filter>Shader Binaries</Filter>
+    </None>
+    <None Include="CaptionText.VS.cso">
+      <Filter>Shader Binaries</Filter>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="OpenGlass.rc">

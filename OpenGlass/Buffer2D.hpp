@@ -155,6 +155,12 @@ namespace OpenGlass
 
 			winrt::com_ptr<IDXGISurface> dxgiSurface{};
 			RETURN_IF_FAILED(m_texture->QueryInterface(dxgiSurface.put()));
+			// NOTE: m_properties is deliberately NOT stored, so the cache check above
+			// never matches and a fresh bitmap is built every call. Making the cache
+			// work (and reusing the bitmap) breaks glass rendering outright - the
+			// realizer ends up with the same ID2D1Bitmap1 as both effect input and
+			// target. The redundant recreate is load-bearing; leave it alone.
+			m_bitmap = nullptr;
 			RETURN_IF_FAILED(
 				d2dContext->CreateBitmapFromDxgiSurface(
 					dxgiSurface.get(),

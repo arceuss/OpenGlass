@@ -70,12 +70,29 @@ namespace OpenGlass
 		winrt::com_ptr<ID3D11Buffer>                m_constantBufferPS{ nullptr };
 		winrt::com_ptr<ID3D11SamplerState>          m_samplerLinearClamp{ nullptr };
 
-		// first stage buffer is quarter width, full height
-		CBuffer2D									m_quarterResBuffer{};
+		// One realizer serves every render target on the device (monitor backbuffers,
+		// window redirection surfaces), whose sizes alternate within a frame. Recreating
+		// a single buffer on every size flip destroys textures that were bound moments
+		// earlier, which the NV driver mishandles (dangling hot-state entries), so keep
+		// one buffer per target description instead. LRU-bounded; eviction only touches
+		// entries several renders stale, which doubles as deferred destruction.
+		struct CPooledBuffer2D
+		{
+			CBuffer2D buffer{};
+			UINT64 lastUse{ 0 };
+		};
+		std::unordered_map<UINT64, CPooledBuffer2D> m_quarterResBuffers{};
+		std::unordered_map<UINT64, CPooledBuffer2D> m_intermediateBuffers{};
+		UINT64 m_bufferUseCounter{ 0 };
 
-		// Fallback when the caller can't provide an SRV for the back buffer:
-		// copy the needed region from backBuffer into this texture and sample it in pass 1.
-		CBuffer2D							m_intermediateBuffer{};
+		CBuffer2D& AcquirePooledBuffer(
+			std::unordered_map<UINT64, CPooledBuffer2D>& pool,
+			UINT width,
+			UINT height,
+			DXGI_FORMAT format,
+			UINT bindFlags,
+			bool hwProtectionEnabled
+		);
 
 		winrt::com_ptr<ID3D11RasterizerState>       m_rasterizerStateScissor{ nullptr };
 		winrt::com_ptr<ID3D11BlendState>            m_blendStateOpaque{ nullptr };

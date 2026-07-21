@@ -418,9 +418,22 @@ HRESULT GlassRenderer::MyCDrawingContext_DrawGeometry(
 	}
 
 	const auto occlusionContext = drawingContext->GetOcclusionContext();
-	const auto d2dContext = drawingContext->GetD3DDevice()->GetD2DContext();
+	const auto d3dDevice = drawingContext->GetD3DDevice();
+	if (!d3dDevice)
+	{
+		return S_OK;
+	}
+	const auto d2dContext = d3dDevice->GetD2DContext();
+	if (!d2dContext)
+	{
+		return S_OK;
+	}
 	const auto context = d2dContext->GetDeviceContext();
 	const auto matrix = drawingContext->GetWorldTransform();
+	if (!matrix)
+	{
+		return S_OK;
+	}
 	
 	if (dwmcore::g_versionInfo.build < os::build_w10_2004)
 	{
@@ -705,6 +718,17 @@ void GlassRenderer::MyID2D1DeviceContext_FillGeometry(
 		return g_ID2D1DeviceContext_FillGeometry_Org(This, geometry, brush, opacityBrush);
 	}
 
+	// fully outside the target (e.g. dragged offscreen): nothing would be rasterized,
+	// so skip the layer/flush/realizer work that tickles a driver use-after-free
+	const auto targetSize = This->GetSize();
+	if (
+		g_drawingWorldBounds.right <= 0.f || g_drawingWorldBounds.left >= targetSize.width ||
+		g_drawingWorldBounds.bottom <= 0.f || g_drawingWorldBounds.top >= targetSize.height
+	)
+	{
+		return g_ID2D1DeviceContext_FillGeometry_Org(This, geometry, brush, opacityBrush);
+	}
+
 	const auto primitiveBlend = This->GetPrimitiveBlend();
 	const auto antialiasMode = This->GetAntialiasMode();
 	D2D1_MATRIX_3X2_F matrix{};
@@ -756,6 +780,10 @@ void GlassRenderer::MyID2D1DeviceContext_FillGeometry(
 	}
 	if (g_renderFlag.test(RenderFlag_Backdrop))
 	{
+		// NOTE: must stay a raw D2D flush. Routing this through
+		// CD2DContext::FlushD2D also drains dwmcore's private draw-list batch, which
+		// composites the caption buttons before the glass backdrop is drawn - they
+		// then get buried under it and the frame border flickers while hovering.
 		LOG_IF_FAILED(This->Flush());
 
 		if (std::holds_alternative<CGlassRealizer>(g_currentDeviceResources->m_glassRealizer))
@@ -774,62 +802,82 @@ void GlassRenderer::MyID2D1DeviceContext_FillGeometry(
 		else
 		{
 			auto& d3dGlassRealizer = std::get<CD3DGlassRealizer>(g_currentDeviceResources->m_glassRealizer);
+			const auto d3dDevice = g_drawingContextNoRef->GetD3DDevice();
 			if (uDWM::g_versionInfo.build < os::build_w10_2004)
 			{
 				const auto renderTarget = g_drawingContextNoRef->GetRenderTarget();
-				const auto d3dSurface = renderTarget->GetTargetSurfaceNoRef();
+				const auto d3dSurface = renderTarget ? renderTarget->GetTargetSurfaceNoRef() : nullptr;
+				if (!d3dSurface || !d3dDevice)
+				{
+					LOG_HR_MSG(E_POINTER, "FillGeometry: d3d surface or device unavailable, skipping glass render");
+				}
+				else
+				{
+					const auto texture2D = d3dSurface->GetTexture2D();
+					const auto renderTargetView = d3dSurface->GetRenderTargetView();
+					const auto shaderResourceView = d3dSurface->GetShaderResourceView();
 
-				const auto texture2D = d3dSurface->GetTexture2D();
-				const auto renderTargetView = d3dSurface->GetRenderTargetView();
-				const auto shaderResourceView = d3dSurface->GetShaderResourceView();
-
-				LOG_IF_FAILED(
-					d3dGlassRealizer.Render(
-						g_drawingContextNoRef->GetD3DDevice()->GetDevice(),
-						g_drawingContextNoRef->GetD3DDevice()->GetImmediateContext(),
-						texture2D,
-						renderTargetView,
-						shaderResourceView,
-						geometry,
-						g_drawingWorldBounds,
-						g_rectangleSpan,
-						g_params,
-						g_type
-					)
-				);
+					LOG_IF_FAILED(
+						d3dGlassRealizer.Render(
+							d3dDevice->GetDevice(),
+							d3dDevice->GetImmediateContext(),
+							texture2D,
+							renderTargetView,
+							shaderResourceView,
+							geometry,
+							g_drawingWorldBounds,
+							g_rectangleSpan,
+							g_params,
+							g_type
+						)
+					);
+				}
 			}
 			else
 			{
 				const auto deviceTarget = g_drawingContextNoRef->GetDeviceTarget();
-				const auto deviceTexture = deviceTarget->GetDeviceTexture();
-
-				auto texture2D = deviceTexture->GetTexture2D();
-				const auto renderTargetView = deviceTarget->GetRenderTargetView();
-				const auto shaderResourceView = deviceTexture->GetShaderResourceView();
-
-				winrt::com_ptr<ID3D11Texture2D> backBufferTexture{};
-				if (!texture2D)
+				const auto deviceTexture = deviceTarget ? deviceTarget->GetDeviceTexture() : nullptr;
+				if (!deviceTexture || !d3dDevice)
 				{
-					winrt::com_ptr<ID2D1Bitmap1> renderTargetBitmap{};
-					THROW_IF_FAILED(Util::GetTargetBitmapFromD2DContext(This, renderTargetBitmap));
-					THROW_IF_FAILED(Util::GetTextureFromD2DBitmap(renderTargetBitmap.get(), backBufferTexture));
-					texture2D = backBufferTexture.get();
+					LOG_HR_MSG(E_POINTER, "FillGeometry: device texture or device unavailable, skipping glass render");
 				}
+				else
+				{
+					auto texture2D = deviceTexture->GetTexture2D();
+					const auto renderTargetView = deviceTarget->GetRenderTargetView();
+					const auto shaderResourceView = deviceTexture->GetShaderResourceView();
 
-				LOG_IF_FAILED(
-					d3dGlassRealizer.Render(
-						g_drawingContextNoRef->GetD3DDevice()->GetDevice(),
-						g_drawingContextNoRef->GetD3DDevice()->GetImmediateContext(),
-						texture2D,
-						renderTargetView,
-						shaderResourceView,
-						geometry,
-						g_drawingWorldBounds,
-						g_rectangleSpan,
-						g_params,
-						g_type
-					)
-				);
+					winrt::com_ptr<ID3D11Texture2D> backBufferTexture{};
+					if (!texture2D)
+					{
+						winrt::com_ptr<ID2D1Bitmap1> renderTargetBitmap{};
+						if (
+							SUCCEEDED(LOG_IF_FAILED(Util::GetTargetBitmapFromD2DContext(This, renderTargetBitmap))) &&
+							SUCCEEDED(LOG_IF_FAILED(Util::GetTextureFromD2DBitmap(renderTargetBitmap.get(), backBufferTexture)))
+						)
+						{
+							texture2D = backBufferTexture.get();
+						}
+					}
+
+					if (texture2D)
+					{
+						LOG_IF_FAILED(
+							d3dGlassRealizer.Render(
+								d3dDevice->GetDevice(),
+								d3dDevice->GetImmediateContext(),
+								texture2D,
+								renderTargetView,
+								shaderResourceView,
+								geometry,
+								g_drawingWorldBounds,
+								g_rectangleSpan,
+								g_params,
+								g_type
+							)
+						);
+					}
+				}
 			}
 		}
 
