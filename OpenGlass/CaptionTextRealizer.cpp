@@ -83,8 +83,6 @@ namespace OpenGlass::CaptionTextRealizer
 	winrt::com_ptr<ID3D11SamplerState> g_samplerState{ nullptr };
 	winrt::com_ptr<ID3D11RasterizerState> g_rasterizerState{ nullptr };
 	std::unordered_map<UINT, TextureEntry> g_textures{};
-<<<<<<< Updated upstream
-=======
 	// the NV driver can crash on a dangling internal pointer when an SRV is destroyed
 	// close to a D2D batch flush; park replaced textures here for a few draws instead
 	struct DeferredRelease
@@ -96,7 +94,6 @@ namespace OpenGlass::CaptionTextRealizer
 	std::vector<DeferredRelease> g_deferredReleases{};
 	UINT64 g_drawCounter{ 0 };
 	constexpr UINT64 g_deferredReleaseDelay{ 8 };
->>>>>>> Stashed changes
 
 	HRESULT EnsureDeviceResources(ID3D11Device* device);
 	HRESULT EnsureTexture(ID3D11Device* device, UINT handle, const PayloadEntry& entry, TextureEntry** result);
@@ -330,13 +327,10 @@ HRESULT CaptionTextRealizer::EnsureTexture(
 		return S_OK;
 	}
 
-<<<<<<< Updated upstream
-=======
 	if (texture.texture)
 	{
 		g_deferredReleases.push_back({ std::move(texture.texture), std::move(texture.srv), g_drawCounter + g_deferredReleaseDelay });
 	}
->>>>>>> Stashed changes
 	texture = {};
 	D3D11_TEXTURE2D_DESC textureDesc{};
 	textureDesc.Width = entry.payload.width;
@@ -362,11 +356,8 @@ HRESULT CaptionTextRealizer::DrawCaptionText(
 	UINT handle
 )
 {
-<<<<<<< Updated upstream
-=======
 	RETURN_HR_IF_NULL(E_POINTER, drawingContext);
 
->>>>>>> Stashed changes
 	// snapshot the payload metrics and text color under the lock
 	LONG bitmapWidth{}, bitmapHeight{}, x{}, y{}, width{}, height{};
 	COLORREF textColor{};
@@ -404,11 +395,8 @@ HRESULT CaptionTextRealizer::DrawCaptionText(
 	RETURN_HR_IF_NULL(E_FAIL, renderTargetView);
 
 	RETURN_IF_FAILED(EnsureDeviceResources(device));
-<<<<<<< Updated upstream
-=======
 	++g_drawCounter;
 	std::erase_if(g_deferredReleases, [](const auto& entry) { return entry.retireAfter <= g_drawCounter; });
->>>>>>> Stashed changes
 	TextureEntry* texture{ nullptr };
 	{
 		const auto lock = g_payloadLock.lock_shared();
@@ -431,13 +419,9 @@ HRESULT CaptionTextRealizer::DrawCaptionText(
 		imageRect.left + (x + width) * scaleX,
 		imageRect.top + (y + height) * scaleY
 	};
-<<<<<<< Updated upstream
-	const auto worldMatrix = drawingContext->GetWorldTransform()->GetD2DMatrix();
-=======
 	const auto worldTransform = drawingContext->GetWorldTransform();
 	RETURN_HR_IF_NULL(E_FAIL, worldTransform);
 	const auto worldMatrix = worldTransform->GetD2DMatrix();
->>>>>>> Stashed changes
 	const auto transformPoint = [&worldMatrix](float px, float py) -> D2D1_POINT_2F
 	{
 		return {
@@ -456,8 +440,6 @@ HRESULT CaptionTextRealizer::DrawCaptionText(
 	D2D1_RECT_F clipBounds{};
 	drawingContext->GetClipBoundsWorld(clipBounds);
 
-<<<<<<< Updated upstream
-=======
 	// fully clipped (e.g. dragged offscreen): nothing would be rasterized, so skip
 	// the flush and raw draw entirely
 	const float quadLeft{ std::min({ corners[0].x, corners[1].x, corners[2].x, corners[3].x }) };
@@ -472,7 +454,6 @@ HRESULT CaptionTextRealizer::DrawCaptionText(
 		return S_FALSE;
 	}
 
->>>>>>> Stashed changes
 	// order the D2D-batched glow draw before our raw quad
 	RETURN_IF_FAILED(drawingContext->FlushD2D());
 
@@ -552,10 +533,7 @@ HRESULT CaptionTextRealizer::DrawCaptionText(
 
 void CaptionTextRealizer::DestroyDeviceResources()
 {
-<<<<<<< Updated upstream
-=======
 	g_deferredReleases.clear();
->>>>>>> Stashed changes
 	g_textures.clear();
 	g_vertexShader = nullptr;
 	g_pixelShader = nullptr;

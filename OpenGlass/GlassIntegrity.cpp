@@ -293,10 +293,8 @@ namespace OpenGlass::GlassIntegrity
 		// were being kept here and written through at flip time, so once the buffer
 		// moved the flip scribbled 36-byte CZOrderedRect records into whatever owned
 		// that memory next - in the captured dumps, the graphics driver's own object.
-		// Keep the array identity and indices instead, and re-verify the identity
-		// before touching anything.
-		const void* arrayData;
-		size_t arrayCount;
+		// Indices are kept instead, and bounds-checked against the live array at flip
+		// time; elementSize guards against the array type differing between builds.
 		size_t elementSize;
 		std::vector<std::pair<size_t, D2D1_RECT_F>> saves;
 	};
@@ -397,8 +395,6 @@ void GlassIntegrity::ShrinkOccludersAboveGlass(dwmcore::COcclusionContext* occlu
 		auto& checkpoint = g_coverageSetCheckpointMap[coverageSet];
 		checkpoint.context = occlusionContext;
 		checkpoint.id = frameId;
-		checkpoint.arrayData = views.data();
-		checkpoint.arrayCount = views.size();
 		checkpoint.elementSize = sizeof(CZOrderedRectT);
 		checkpoint.saves.clear();
 		checkpoint.saves.reserve(targetOccluderSet.size());
