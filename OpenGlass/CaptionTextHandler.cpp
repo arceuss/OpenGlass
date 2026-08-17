@@ -137,6 +137,9 @@ namespace OpenGlass::CaptionTextHandler
 	// hardcoded display settings default 1); PrecontrastLevel (+1 for thin fonts) is
 	// added on top and the sum clamped to [0, 6]. Calibrated against Win7 captures.
 	int g_captionTextContrast{ 1 };
+	// which OS' caption text aliasing to reproduce: 0 = Windows 7 (6x glyph pipeline,
+	// gamma index 9), 1 = Windows 8 (GDI ClearType remapped onto gamma index 2)
+	int g_captionTextAliasing{ 0 };
 	int CaptionCenterOffset(double visualWidth, double textWidth, double visualX, double parentWidth, double scale)
 	{
 		const int localOffset = std::max(
@@ -444,6 +447,422 @@ namespace OpenGlass::CaptionTextHandler
 		return true;
 	}
 
+	// dwmcore!CGammaHandler::sc_gammaRatios. The table is byte-for-byte identical from
+	// the Windows 8 builds (7762/8.0/8.1) through 19041; entry n is gamma level
+	// 1000 + n*100, and CGammaHandler::CalculateGammaTable folds the two halves of the
+	// polynomial with slightly different scale factors (below).
+	struct CGammaRatios
+	{
+		float g1, g2, g3, g4;
+	};
+	constexpr CGammaRatios g_gammaRatios[]
+	{
+		{  0.000000f,  0.000000f,  0.000000f,  0.000000f },
+		{  0.004150f, -0.020175f,  0.055675f, -0.018775f },
+		{  0.008750f, -0.044000f,  0.108125f, -0.034250f },
+		{  0.013575f, -0.070525f,  0.157550f, -0.046900f },
+		{  0.018475f, -0.099075f,  0.204175f, -0.057175f },
+		{  0.023325f, -0.129025f,  0.248150f, -0.065400f },
+		{  0.028025f, -0.159875f,  0.289700f, -0.071925f },
+		{  0.032500f, -0.191225f,  0.328975f, -0.077000f },
+		{  0.036725f, -0.222775f,  0.366100f, -0.080850f },
+		{  0.040675f, -0.254250f,  0.401275f, -0.083675f },
+		{  0.044325f, -0.285500f,  0.434625f, -0.085650f },
+		{  0.047700f, -0.316300f,  0.466250f, -0.086900f },
+		{  0.050775f, -0.346600f,  0.496275f, -0.087525f }
+	};
+	// CGammaHandler::CalculateGammaTable multiplies the g1/g3 half by 4.0314341 and the
+	// g2/g4 half by 4.0156865 before folding them into the shader's C1/C2 constants
+	constexpr float g_gammaScale_g1g3{ 4.0314341f };
+	constexpr float g_gammaScale_g2g4{ 4.0156865f };
+
+	// The subpixel coverage filter is a 6 sample box per channel, so coverage is always
+	// one of 7 values - the popcount 0..6 put through the gamma curve. Windows 8's caption
+	// text uses gamma index 2 (level 1200), where Windows 7's DWM used its hardcoded
+	// CGammaHandler::HardCodedGammaLevel = 1900 (index 9). Index 2's curve is far flatter,
+	// which leaves partial-coverage subpixels much more opaque and is exactly what gives
+	// Windows 8 its heavier, purple-fringed caption text.
+	constexpr int g_captionTextGammaIndex{ 2 };
+	constexpr int g_coverageLevelCount{ 7 };
+
+	// The 7 coverage levels dwmcore's ClearType shader produces for this text colour.
+	//
+	// CGammaHandler::CalculateGammaTable precomputes a 256 entry table of byte pairs
+	//     f1 = g + 4.0156865*g*(1-g)*(g2*g + g4)
+	//     f2 =     4.0314341*g*(1-g)*(g1*g + g3)
+	// and the shader combines them with the text colour's luma as f1 + luma*f2 (that is
+	// CD3DRenderState::SetConstantRegisters' C1/C2 folded back together).
+	//
+	// Both halves are quantized to bytes *separately* when the table is built, and the
+	// store is the classic magic-number trick - `v + 1.5*2^22` then `(int)(bits << 10) >> 11`
+	// - which works out to floor(round(2*v)/2), not round(v). Getting that exactly right
+	// matters: it is the difference between coverage 116 and 117 at half coverage, and so
+	// between matching Windows 8's caption text byte for byte and being one unit off.
+	void CalculateCoverageLevels(COLORREF textColor, BYTE(&levels)[g_coverageLevelCount])
+	{
+		const auto& ratios{ g_gammaRatios[g_captionTextGammaIndex] };
+		const float luma{ (GetRValue(textColor) + 2.f * GetGValue(textColor) + GetBValue(textColor)) / (4.f * 255.f) };
+		// CalculateGammaTable's fixed-point store
+		const auto quantize = [](float value)
+		{
+			return static_cast<float>(std::clamp(static_cast<int>(std::floor(std::round(value * 2.f) / 2.f)), 0, 255));
+		};
+		for (int popcount = 0; popcount < g_coverageLevelCount; popcount++)
+		{
+			const float g{ static_cast<float>(popcount * 255 / (g_coverageLevelCount - 1)) / 255.f };
+			const float shoulder{ g * (1.f - g) };
+			const float f1{ quantize((g + g_gammaScale_g2g4 * shoulder * (ratios.g2 * g + ratios.g4)) * 255.f) };
+			const float f2{ quantize((g_gammaScale_g1g3 * shoulder * (ratios.g1 * g + ratios.g3)) * 255.f) };
+			levels[popcount] = static_cast<BYTE>(std::clamp(f1 + luma * f2, 0.f, 255.f));
+		}
+	}
+
+	// A 32bpp top-down DIB we can render GDI text into and read back.
+	struct CTextSurface
+	{
+		wil::unique_hdc dc{};
+		wil::unique_hbitmap bitmap{};
+		HGDIOBJ previousBitmap{ nullptr };
+		BYTE* bits{ nullptr };
+		LONG width{}, height{};
+
+		~CTextSurface()
+		{
+			if (dc && previousBitmap)
+			{
+				SelectObject(dc.get(), previousBitmap);
+			}
+		}
+		bool Create(LONG cx, LONG cy)
+		{
+			dc.reset(CreateCompatibleDC(nullptr));
+			if (!dc || cx <= 0 || cy <= 0)
+			{
+				return false;
+			}
+			BITMAPINFO info{ { sizeof(BITMAPINFOHEADER), cx, -cy, 1, 32, BI_RGB } };
+			void* pixels{ nullptr };
+			bitmap.reset(CreateDIBSection(dc.get(), &info, DIB_RGB_COLORS, &pixels, nullptr, 0));
+			if (!bitmap)
+			{
+				return false;
+			}
+			previousBitmap = SelectObject(dc.get(), bitmap.get());
+			bits = static_cast<BYTE*>(pixels);
+			width = cx;
+			height = cy;
+			return true;
+		}
+		void Fill(BYTE value) const
+		{
+			memset(bits, value, static_cast<size_t>(width) * height * 4);
+		}
+	};
+
+	// Renders the text into `surface` over a flat `background`, with GDI's own ClearType
+	// rasterizer. lfQuality is forced to CLEARTYPE_QUALITY so we get subpixel coverage
+	// even though uDWM's DC was set up for the grayscale DrawThemeTextEx path.
+	bool DrawClearTypeText(
+		const CTextSurface& surface,
+		HFONT font,
+		UINT textAlign,
+		COLORREF textColor,
+		BYTE background,
+		LPCWSTR lpchText,
+		int cchText,
+		LPCRECT textRect,
+		UINT format,
+		int* textHeight
+	)
+	{
+		surface.Fill(background);
+		const HGDIOBJ previousFont{ SelectObject(surface.dc.get(), font) };
+		const auto fontCleanup{ wil::scope_exit([&] { SelectObject(surface.dc.get(), previousFont); }) };
+		SetBkMode(surface.dc.get(), TRANSPARENT);
+		SetTextAlign(surface.dc.get(), textAlign);
+		SetTextColor(surface.dc.get(), textColor);
+
+		// the text rect keeps its original size (so DT_CENTER/DT_*_ELLIPSIS behave the
+		// same) but is placed one pixel in, leaving room for the fringe to spill
+		RECT rect{ 1, 0, 1 + wil::rect_width(*textRect), wil::rect_height(*textRect) };
+		const int height{ g_DrawTextW_Org(surface.dc.get(), lpchText, cchText, &rect, format) };
+		GdiFlush();
+		if (textHeight)
+		{
+			*textHeight = height;
+		}
+		return height != 0;
+	}
+
+	// GDI applies its own gamma to the coverage, so its 7 levels don't line up with
+	// dwmcore's. Both are monotone functions of the same box popcount, so measuring GDI's
+	// levels once lets us map level-for-level onto dwmcore's. The measurement needs a
+	// string that exercises every popcount; a stem-heavy pangram-ish sweep does.
+	constexpr LPCWSTR g_coverageCalibrationText{ L"Hamburgefonstiv WMil1|0OQ 123456789" };
+	struct CCoverageMap
+	{
+		// GDI coverage byte -> dwmcore coverage byte
+		BYTE remap[256]{};
+	};
+	// GDI's gamma depends on the text colour, so the remap does too. Cache one per colour
+	// rather than one overall: a window alternating between its active and inactive caption
+	// colours would otherwise recalibrate on every focus change.
+	LOGFONTW g_coverageFont{};
+	std::unordered_map<COLORREF, CCoverageMap> g_coverageMaps{};
+	const CCoverageMap* g_coverageMap{ nullptr };
+
+	// solves per-channel coverage out of the two flat-background renders:
+	//   overBlack = T*a          overWhite = T*a + 255*(1 - a)
+	//   => a = 1 - (overWhite - overBlack)/255
+	inline BYTE SolveCoverage(BYTE overBlack, BYTE overWhite)
+	{
+		const int transparency{ overWhite - overBlack };
+		return static_cast<BYTE>(255 - std::clamp(transparency, 0, 255));
+	}
+
+	// builds the GDI -> dwmcore coverage remap for a font/colour pair, leaving it in
+	// g_coverageMap
+	bool EnsureCoverageMap(HFONT font, const LOGFONTW& logFont, COLORREF textColor)
+	{
+		if (memcmp(&g_coverageFont, &logFont, sizeof(logFont)))
+		{
+			g_coverageMaps.clear();
+			g_coverageFont = logFont;
+		}
+		else if (const auto it = g_coverageMaps.find(textColor); it != g_coverageMaps.end())
+		{
+			g_coverageMap = &it->second;
+			return true;
+		}
+		g_coverageMap = nullptr;
+
+		const int cchCalibration{ static_cast<int>(wcslen(g_coverageCalibrationText)) };
+		wil::unique_hdc measureDC{ CreateCompatibleDC(nullptr) };
+		if (!measureDC)
+		{
+			return false;
+		}
+		const HGDIOBJ previousFont{ SelectObject(measureDC.get(), font) };
+		RECT measureRect{};
+		g_DrawTextW_Org(measureDC.get(), g_coverageCalibrationText, cchCalibration, &measureRect, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+		SelectObject(measureDC.get(), previousFont);
+
+		CTextSurface overBlack{}, overWhite{};
+		const LONG width{ measureRect.right + 4 };
+		const LONG height{ std::max(measureRect.bottom, 1l) + 2 };
+		if (!overBlack.Create(width, height) || !overWhite.Create(width, height))
+		{
+			return false;
+		}
+		const RECT calibrationRect{ 0, 0, measureRect.right, height };
+		constexpr UINT calibrationFormat{ DT_SINGLELINE | DT_NOPREFIX | DT_TOP | DT_LEFT };
+		if (
+			!DrawClearTypeText(overBlack, font, TA_LEFT | TA_TOP, textColor, 0x00, g_coverageCalibrationText, cchCalibration, &calibrationRect, calibrationFormat, nullptr) ||
+			!DrawClearTypeText(overWhite, font, TA_LEFT | TA_TOP, textColor, 0xFF, g_coverageCalibrationText, cchCalibration, &calibrationRect, calibrationFormat, nullptr)
+		)
+		{
+			return false;
+		}
+
+		// collect the distinct coverage values GDI produced
+		std::bitset<256> seen{};
+		for (size_t i = 0; i < static_cast<size_t>(width) * height * 4; i++)
+		{
+			if ((i % 4) == 3)
+			{
+				continue;
+			}
+			seen.set(SolveCoverage(overBlack.bits[i], overWhite.bits[i]));
+		}
+		std::vector<BYTE> gdiLevels{};
+		for (int value = 0; value < 256; value++)
+		{
+			if (seen.test(value))
+			{
+				gdiLevels.push_back(static_cast<BYTE>(value));
+			}
+		}
+		auto& map = g_coverageMaps[textColor];
+		g_coverageMap = &map;
+		// anything other than exactly the 7 box levels means GDI isn't running the plain
+		// ClearType filter (grayscale antialiasing, a reduced ClearTypeLevel, ...); in that
+		// case leave the coverage alone rather than mangling it
+		if (gdiLevels.size() != g_coverageLevelCount)
+		{
+			for (int value = 0; value < 256; value++)
+			{
+				map.remap[value] = static_cast<BYTE>(value);
+			}
+			return true;
+		}
+
+		BYTE dwmLevels[g_coverageLevelCount]{};
+		CalculateCoverageLevels(textColor, dwmLevels);
+		// map every possible byte to the dwmcore level whose GDI counterpart is nearest
+		for (int value = 0; value < 256; value++)
+		{
+			size_t nearest{ 0 };
+			int nearestDistance{ 256 };
+			for (size_t level = 0; level < gdiLevels.size(); level++)
+			{
+				const int distance{ std::abs(value - static_cast<int>(gdiLevels[level])) };
+				if (distance < nearestDistance)
+				{
+					nearestDistance = distance;
+					nearest = level;
+				}
+			}
+			map.remap[value] = dwmLevels[nearest];
+		}
+		return true;
+	}
+
+	// Win8-accurate caption text rasterizer.
+	//
+	// dwmcore's glyph pipeline gets its 6x oversampled glyph coverage from GDI and then
+	// applies its own filter and gamma, so GDI's plain ClearType output already carries
+	// exactly the subpixel structure Windows 8 shows - same glyph positions, same subpixel
+	// phases, same box popcounts. Reimplementing CGlyphGen/ThickenBitmap/FilterBox on top
+	// of a stretched font instead drifts out of phase, because dwmcore places each glyph
+	// from its 1x advance rather than from the 6x font's own advances.
+	//
+	// So: let GDI rasterize, recover the per-channel coverage it used, and remap its 7
+	// levels onto dwmcore's (see EnsureCoverageMap). Coverage is recovered by rendering
+	// the same text over black and over white, which cancels the text colour out.
+	//
+	// The compositor only honors a single alpha channel, so per-channel coverage goes to
+	// the dwmcore-side realizer; without it there is nowhere to put subpixel text, so we
+	// decline and let DrawThemeTextEx render as before.
+	bool RenderWin8CaptionText(
+		HDC hdc,
+		LPCWSTR lpchText,
+		int cchText,
+		LPCRECT lprc,
+		UINT format,
+		COLORREF textColor,
+		int* result
+	)
+	{
+		// A single-alpha bitmap cannot express per-channel coverage, so without the
+		// dwmcore-side realizer there is nowhere to put subpixel text. Decline and let the
+		// caller fall back to DrawThemeTextEx's grayscale rendering rather than bake
+		// something that would blend wrongly against the frame.
+		if (!g_CDrawImageInstruction_Create_Org || !CaptionTextRealizer::IsAvailable())
+		{
+			return false;
+		}
+
+		BITMAP targetInfo{};
+		if (
+			!GetObjectW(GetCurrentObject(hdc, OBJ_BITMAP), sizeof(targetInfo), &targetInfo) ||
+			!targetInfo.bmBits ||
+			targetInfo.bmBitsPixel != 32
+		)
+		{
+			return false;
+		}
+		const LONG textRectWidth{ wil::rect_width(*lprc) };
+		const LONG textRectHeight{ wil::rect_height(*lprc) };
+		if (textRectWidth <= 0 || textRectHeight <= 0)
+		{
+			return false;
+		}
+
+		LOGFONTW captionFont{};
+		if (!GetObjectW(GetCurrentObject(hdc, OBJ_FONT), sizeof(captionFont), &captionFont))
+		{
+			return false;
+		}
+		// uDWM sets the DC up for the grayscale DrawThemeTextEx path; ask for ClearType
+		captionFont.lfQuality = CLEARTYPE_QUALITY;
+		wil::unique_hfont renderFont{ CreateFontIndirectW(&captionFont) };
+		if (!renderFont)
+		{
+			return false;
+		}
+
+		if (!EnsureCoverageMap(renderFont.get(), captionFont, textColor) || !g_coverageMap)
+		{
+			return false;
+		}
+		const auto& coverageRemap = g_coverageMap->remap;
+
+		// one pixel of slop on each side for the fringe to spill into
+		const LONG coverageWidth{ textRectWidth + 2 };
+		CTextSurface overBlack{}, overWhite{};
+		if (!overBlack.Create(coverageWidth, textRectHeight) || !overWhite.Create(coverageWidth, textRectHeight))
+		{
+			return false;
+		}
+		const UINT textAlign{ GetTextAlign(hdc) };
+		int textHeight{ 0 };
+		if (
+			!DrawClearTypeText(overBlack, renderFont.get(), textAlign, textColor, 0x00, lpchText, cchText, lprc, format, &textHeight) ||
+			!DrawClearTypeText(overWhite, renderFont.get(), textAlign, textColor, 0xFF, lpchText, cchText, lprc, format, nullptr)
+		)
+		{
+			return false;
+		}
+
+		CaptionTextRealizer::CoveragePayload payload{};
+		payload.bitmapWidth = targetInfo.bmWidth;
+		payload.bitmapHeight = targetInfo.bmHeight;
+		payload.x = lprc->left - 1;
+		payload.y = lprc->top;
+		payload.width = coverageWidth;
+		payload.height = textRectHeight;
+		payload.textColor = textColor;
+		payload.pixels.resize(static_cast<size_t>(payload.width) * payload.height * 4);
+
+		for (LONG y = 0; y < textRectHeight; y++)
+		{
+			const BYTE* blackRow{ overBlack.bits + static_cast<size_t>(y) * coverageWidth * 4 };
+			const BYTE* whiteRow{ overWhite.bits + static_cast<size_t>(y) * coverageWidth * 4 };
+			BYTE* payloadRow{ payload.pixels.data() + static_cast<size_t>(y) * payload.width * 4 };
+			for (LONG x = 0; x < coverageWidth; x++)
+			{
+				// B, G, R coverage in memory order, remapped onto dwmcore's gamma
+				const BYTE alpha[3]
+				{
+					coverageRemap[SolveCoverage(blackRow[x * 4 + 0], whiteRow[x * 4 + 0])],
+					coverageRemap[SolveCoverage(blackRow[x * 4 + 1], whiteRow[x * 4 + 1])],
+					coverageRemap[SolveCoverage(blackRow[x * 4 + 2], whiteRow[x * 4 + 2])]
+				};
+				if (!alpha[0] && !alpha[1] && !alpha[2])
+				{
+					continue;
+				}
+				// straight per-subpixel coverage for the realizer's blend; alpha is
+				// the center (green) tap like the ClearType glyph shader outputs
+				BYTE* pixel{ payloadRow + static_cast<size_t>(x) * 4 };
+				pixel[0] = alpha[0];
+				pixel[1] = alpha[1];
+				pixel[2] = alpha[2];
+				pixel[3] = alpha[1];
+			}
+		}
+		g_pendingCoverage.emplace(std::move(payload));
+
+		*result = textHeight;
+		return true;
+	}
+
+	// dispatches to the rasterizer the CaptionTextAliasing setting selects
+	bool RenderCaptionText(
+		HDC hdc,
+		LPCWSTR lpchText,
+		int cchText,
+		LPCRECT lprc,
+		UINT format,
+		COLORREF textColor,
+		int* result
+	)
+	{
+		return g_captionTextAliasing == 1
+			? RenderWin8CaptionText(hdc, lpchText, cchText, lprc, format, textColor, result)
+			: RenderWin7CaptionText(hdc, lpchText, cchText, lprc, format, textColor, result);
+	}
+
 	void CalculateRealizedTextGlowParams(int textGlowMode);
 }
 
@@ -465,21 +884,24 @@ int WINAPI CaptionTextHandler::MyDrawTextW(
 	{
 		const LONG availableWidth{ wil::rect_width(*lprc) };
 		result = g_DrawTextW_Org(hdc, lpchText, cchText, lprc, format);
+		LONG naturalWidth{ wil::rect_width(*lprc) };
 
-		if ((format & DT_END_ELLIPSIS) != 0)
+		// CText caches this CALCRECT result as the natural caption extent and uses it
+		// to decide whether a later SetSize must recreate the bitmap. Always publish
+		// the same 6x extent used by RenderWin7CaptionText, even while the title is
+		// currently clipped; otherwise rerasterization stops at the narrower 1x GDI
+		// extent and the last part of the title stays ellipsized. The Win8 rasterizer
+		// draws with the ordinary 1x font, so its extent is the one GDI just returned.
+		if (g_captionTextAliasing != 1)
 		{
-			RECT rawTextRect{};
-			g_DrawTextW_Org(hdc, lpchText, cchText, &rawTextRect, DT_CALCRECT | DT_NOPREFIX | DT_SINGLELINE);
-			g_isTrimmed = wil::rect_width(*lprc) < wil::rect_width(rawTextRect);
+			if (const LONG scaledExtent{ MeasureWin7ScaledTextWidth(hdc, lpchText, cchText, format & ~DT_CALCRECT) };
+				scaledExtent > 0)
+			{
+				naturalWidth = scaledExtent;
+				lprc->right = lprc->left + scaledExtent;
+			}
 		}
-
-		// size the text bitmap from the 6x measurement like Win7 does, so the render
-		// pass fits exactly and fitting titles don't get spuriously ellipsized
-		if (const LONG scaledExtent{ MeasureWin7ScaledTextWidth(hdc, lpchText, cchText, format & ~DT_CALCRECT) };
-			scaledExtent > 0 && scaledExtent <= availableWidth)
-		{
-			lprc->right = lprc->left + scaledExtent;
-		}
+		g_isTrimmed = naturalWidth > availableWidth;
 
 		return result;
 	}
@@ -647,15 +1069,15 @@ int WINAPI CaptionTextHandler::MyDrawTextW(
 	}
 
 	// glow mode 3 generates its glow inside DrawThemeTextEx, so keep that call and
-	// overdraw the Win7-accurate text on top of it; every other mode renders the text
+	// overdraw the accurate text on top of it; every other mode renders the text
 	// directly (with DrawThemeTextEx as fallback should the rasterizer fail)
 	const bool themeGeneratedGlow{ LOWORD(Shared::g_textGlowMode) == 3 && g_textGlowSize != 0 };
-	bool win7TextRendered{ false };
+	bool captionTextRendered{ false };
 	if (!themeGeneratedGlow)
 	{
-		win7TextRendered = RenderWin7CaptionText(hdc, lpchText, cchText, lprc, format, options.crText, &result);
+		captionTextRendered = RenderCaptionText(hdc, lpchText, cchText, lprc, format, options.crText, &result);
 	}
-	if (!win7TextRendered)
+	if (!captionTextRendered)
 	{
 		wil::unique_htheme hTheme{ OpenThemeData(nullptr, L"CompositedWindow::Window") };
 		if (hTheme)
@@ -675,7 +1097,7 @@ int WINAPI CaptionTextHandler::MyDrawTextW(
 			);
 			if (themeGeneratedGlow)
 			{
-				RenderWin7CaptionText(hdc, lpchText, cchText, lprc, format, options.crText, &result);
+				RenderCaptionText(hdc, lpchText, cchText, lprc, format, options.crText, &result);
 			}
 		}
 		else
@@ -713,7 +1135,10 @@ HBITMAP WINAPI CaptionTextHandler::MyCreateBitmap(
 	PVOID bits{ nullptr };
 	BITMAPINFO bitmapInfo{ {sizeof(bitmapInfo.bmiHeader), nWidth, -nHeight, 1, 32, BI_RGB} };
 	HBITMAP bitmap{ CreateDIBSection(nullptr, &bitmapInfo, DIB_RGB_COLORS, &bits, nullptr, 0) };
-	memset(bits, 0, sizeof(nWidth * nHeight * 4));
+	if (bits)
+	{
+		memset(bits, 0, static_cast<size_t>(nWidth) * nHeight * 4);
+	}
 
 	return bitmap;
 }
@@ -1412,6 +1837,7 @@ void CaptionTextHandler::Update(GlassEngine::UpdateType type)
 	if (type & GlassEngine::UpdateType::Backdrop || type & GlassEngine::UpdateType::Theme)
 	{
 		g_centerCaption = std::clamp(static_cast<int>(GlassEngine::GetDwordFromRegistry(L"CenterCaption", FALSE)), 0, 2);
+		g_captionTextAliasing = std::clamp(static_cast<int>(GlassEngine::GetDwordFromRegistry(L"CaptionTextAliasing", FALSE)), 0, 1);
 		g_captionActiveColor = GlassEngine::GetDwordFromRegistry(L"ColorizationColorCaption", 0xFFFFFFFD);
 		g_captionInactiveColor = GlassEngine::GetDwordFromRegistry(L"ColorizationColorCaptionInactive", g_captionActiveColor);
 		g_captionActiveColorMaximized = GlassEngine::GetDwordFromRegistry(L"ColorizationColorCaptionMaximized", g_captionActiveColor);

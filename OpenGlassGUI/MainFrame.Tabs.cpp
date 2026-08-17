@@ -474,6 +474,21 @@ namespace OpenGlass
 			textGroup->Add(row, 0, wxEXPAND | wxALL, 2);
 		}
 
+		// Caption Text Aliasing
+		{
+			wxBoxSizer* row = new wxBoxSizer(wxHORIZONTAL);
+			wxStaticText* label = new wxStaticText(panel, wxID_ANY, L"Text aliasing style:", wxDefaultPosition, wxSize(300, -1));
+			row->Add(label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+
+			wxArrayString aliasingStyles;
+			aliasingStyles.Add(L"Windows 7 style");
+			aliasingStyles.Add(L"Windows 8 style");
+			m_chCaptionTextAliasing = new wxChoice(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, aliasingStyles);
+			row->Add(m_chCaptionTextAliasing, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+			AddOptionStatus(panel, row, L"CaptionTextAliasing");
+			textGroup->Add(row, 0, wxEXPAND | wxALL, 2);
+		}
+
 		// Text Glow Mode
 		{
 			wxBoxSizer* row = new wxBoxSizer(wxHORIZONTAL);
