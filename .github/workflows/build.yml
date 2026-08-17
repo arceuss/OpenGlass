@@ -122,11 +122,17 @@ jobs:
           # The projects import vcpkg through Common\CppProject.Configuration.props
           # (VcpkgEnableManifest/VcpkgManifestInstall default to true), but the hosted
           # runner has no user-wide vcpkg integration, so force the imports in.
+          #
+          # Do NOT pass /p:VcpkgTriplet here. vcpkg.targets runs the install in a child
+          # MSBuild project with RemoveProperties=<every global property>, then re-supplies
+          # VcpkgTriplet via Properties=. RemoveProperties wins, so a globally-set triplet
+          # is stripped from the child and vcpkg is invoked with --triplet "" ("Invalid
+          # triplet"). Left alone it derives x64-windows-static from Platform plus
+          # VcpkgUseStatic=true in Common\CppProject.Configuration.props.
           msbuild OpenGlass.slnx /m /restore `
             /p:Configuration=$env:BUILD_CONFIGURATION `
             /p:Platform=$env:BUILD_PLATFORM `
             /p:RestorePackagesConfig=true `
-            /p:VcpkgTriplet=$env:VCPKG_DEFAULT_TRIPLET `
             /p:ForceImportBeforeCppProps=$env:VCPKG_ROOT\scripts\buildsystems\msbuild\vcpkg.props `
             /p:ForceImportAfterCppTargets=$env:VCPKG_ROOT\scripts\buildsystems\msbuild\vcpkg.targets `
             /p:OpenGlassInstallerEnabled=false `

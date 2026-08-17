@@ -54,19 +54,30 @@ SIZE CaptionMetricsTweaker::CalculateButtonSize(int cySize, int buttonType)
 
 	SIZE buttonSize = { 0, static_cast<LONG>(std::round(static_cast<float>(cySize) * heightRatio)) };
 
+	// Vista/Win7 scale the widths straight off the caption height, but Win8 chains them
+	// off the button height it just computed:
+	//     v8  = floor(iCaptionHeight * 0.95454544 + 0.5);   // height
+	//     v10 = floor(v8 * ratio + 0.5);                    // width, from the height
+	// (CTopLevelWindow::UpdateNCAreaButton, verified identical in 8102, 8400, 9200 and
+	// 9600; Win7 7600 uses floor(iCaptionHeight * ratio + 0.5) instead).
+	const float widthBase
+	{
+		static_cast<float>(g_captionButtons == CaptionButtons::Windows8 ? buttonSize.cy : cySize)
+	};
+
 	switch (buttonType)
 	{
 	case CloseButton:
-		buttonSize.cx = static_cast<LONG>(std::round(static_cast<float>(cySize) * closeWidthRatio));
+		buttonSize.cx = static_cast<LONG>(std::round(widthBase * closeWidthRatio));
 		break;
 	case MaxButton:
-		buttonSize.cx = static_cast<LONG>(std::round(static_cast<float>(cySize) * maxWidthRatio));
+		buttonSize.cx = static_cast<LONG>(std::round(widthBase * maxWidthRatio));
 		break;
 	case MinButton:
-		buttonSize.cx = static_cast<LONG>(std::round(static_cast<float>(cySize) * minWidthRatio));
+		buttonSize.cx = static_cast<LONG>(std::round(widthBase * minWidthRatio));
 		break;
 	case LoneButton:
-		buttonSize.cx = static_cast<LONG>(std::round(static_cast<float>(cySize) * loneWidthRatio));
+		buttonSize.cx = static_cast<LONG>(std::round(widthBase * loneWidthRatio));
 		break;
 	default:
 		break;
@@ -143,6 +154,13 @@ HRESULT CaptionMetricsTweaker::MyCTopLevelWindow_UpdateNCAreaPositionsAndSizes(u
 	if (toolWindow)
 	{
 		int cySmSize = GetSystemMetricsForDpi(SM_CYSMSIZE, data->GetWindowDPI());
+		// Win8 runs the small-caption metric through the same height ratio before making
+		// the button square; Win7/Vista use it raw. Passing -1 hits CalculateButtonSize's
+		// default case, so only the height is computed.
+		if (g_captionButtons == CaptionButtons::Windows8)
+		{
+			cySmSize = CalculateButtonSize(cySmSize, -1).cy;
+		}
 		SIZE toolButtonSize = { cySmSize , cySmSize };
 
 		offsetTop = (borderMargins.cyTopHeight - toolButtonSize.cy - 4 > offsetTop) ? borderMargins.cyTopHeight - toolButtonSize.cy - 4 : offsetTop;
