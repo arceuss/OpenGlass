@@ -1,0 +1,144 @@
+name: Apply and validate 25H2 caption text port
+
+on:
+  push:
+    branches:
+      - port/25h2-caption-text
+
+permissions:
+  contents: write
+
+concurrency:
+  group: caption-port-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  apply-build-commit:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 90
+    env:
+      BUILD_CONFIGURATION: Release
+      BUILD_PLATFORM: x64
+      VCPKG_ROOT: C:\vcpkg
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static
+      VCPKG_INSTALLED_DIR: ${{ github.workspace }}\vcpkg_installed
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\.ci-cache\vcpkg-binary-cache
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\.ci-cache\vcpkg-binary-cache,readwrite
+
+    steps:
+      - name: Checkout port branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: port/25h2-caption-text
+
+      - name: Apply caption text transplant
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python Scripts/apply_25h2_caption_port.py
+          git diff --check
+
+      - name: Validate projection symbols
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python .agents/skills/maintain-dwm-offsets/scripts/validate_projection_symbols.py . --architecture legacy
+          python .agents/skills/maintain-dwm-offsets/scripts/validate_projection_symbols.py . --architecture milcomp
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3.0.0
+
+      - name: Cache NuGet packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~\.nuget\packages
+            ${{ github.workspace }}\packages
+          key: ${{ runner.os }}-${{ runner.arch }}-nuget-${{ hashFiles('**/packages.config', '**/NuGet.config', 'Common/NuGet.props', 'Common/NuGet.targets') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-nuget-
+
+      - name: Cache vcpkg binary packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}\.ci-cache\vcpkg-binary-cache
+          key: ${{ runner.os }}-${{ runner.arch }}-v145-x64-windows-static-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'ports/**') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-v145-x64-windows-static-
+
+      - name: Install vcpkg dependencies
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          & "$env:VCPKG_ROOT\vcpkg.exe" install `
+            "--triplet=$env:VCPKG_DEFAULT_TRIPLET" `
+            "--x-manifest-root=$env:GITHUB_WORKSPACE" `
+            "--x-install-root=$env:VCPKG_INSTALLED_DIR"
+
+      - name: Build Release x64
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          New-Item -ItemType Directory -Force -Path "MSBuild_Logs" | Out-Null
+          msbuild OpenGlass.slnx /m /restore `
+            /p:Configuration=$env:BUILD_CONFIGURATION `
+            /p:Platform=$env:BUILD_PLATFORM `
+            /p:RestorePackagesConfig=true `
+            /p:VcpkgEnableManifest=true `
+            /p:VcpkgManifestInstall=false `
+            /p:VcpkgRoot=$env:VCPKG_ROOT `
+            /p:VcpkgInstalledDir=$env:VCPKG_INSTALLED_DIR `
+            /p:VcpkgTriplet=$env:VCPKG_DEFAULT_TRIPLET `
+            /p:ForceImportBeforeCppProps=$env:VCPKG_ROOT\scripts\buildsystems\msbuild\vcpkg.props `
+            /p:ForceImportAfterCppTargets=$env:VCPKG_ROOT\scripts\buildsystems\msbuild\vcpkg.targets `
+            /p:OpenGlassInstallerEnabled=false `
+            /bl:MSBuild_Logs/caption-port.binlog
+
+      - name: Run OpenGlass tests
+        run: |
+          $testExecutable = "Build\x64\Release\common\OpenGlassTests.exe"
+          if (-not (Test-Path -LiteralPath $testExecutable -PathType Leaf)) {
+              throw "Test executable was not built: $testExecutable"
+          }
+          & $testExecutable
+          if ($LASTEXITCODE -ne 0) {
+              throw "OpenGlassTests failed with exit code $LASTEXITCODE."
+          }
+
+      - name: Commit validated transplant
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -- Scripts/apply_25h2_caption_port.py .github/workflows/apply-25h2-caption-port.yml
+          git add -- Common/SettingsCatalog.hpp OpenGlass/Architecture/Legacy/CaptionTextHandler.cpp OpenGlass/Architecture/Legacy/CaptionTextRasterizer.inl
+          git diff --cached --check
+          git commit -m "Port Win7/Win8 caption aliasing to Windows 11 CDWriteText"
+          git push origin HEAD:port/25h2-caption-text
+
+      - name: Create patch
+        run: |
+          New-Item -ItemType Directory -Force -Path "Build\caption-port" | Out-Null
+          git diff 2364db1fd42112acb9673fcd76731496607537b8..HEAD --binary | Out-File -LiteralPath "Build\caption-port\OpenGlass-25H2-caption-text.patch" -Encoding utf8
+
+      - name: Upload validated binaries and patch
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: OpenGlass-25H2-caption-text-${{ github.run_id }}
+          path: |
+            Build/x64/Release/legacy/OpenGlass.dll
+            Build/x64/Release/legacy/OpenGlass.pdb
+            Build/caption-port/OpenGlass-25H2-caption-text.patch
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload MSBuild binary log on failure
+        if: failure() && hashFiles('MSBuild_Logs/caption-port.binlog') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: caption-port-binlog-${{ github.run_id }}
+          path: MSBuild_Logs/caption-port.binlog
+          if-no-files-found: ignore
+          retention-days: 14
