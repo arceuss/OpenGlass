@@ -27,6 +27,11 @@ handler = replace_once(
     "\n"
     "#include \"CaptionTextRasterizer.inl\"\n"
     "\n"
+    "\tint CaptionSurfacePadding() noexcept\n"
+    "\t{\n"
+    "\t\treturn std::max(g_textGlowSize, 1);\n"
+    "\t}\n"
+    "\n"
     "\tint CaptionCenterOffset",
     "caption rasterizer include",
 )
@@ -45,6 +50,8 @@ handler = replace_once(
     "\t}\n",
     "\tif (!g_textGlowSize)\n"
     "\t{\n"
+    "\t\torigin.x += static_cast<float>(CaptionSurfacePadding());\n"
+    "\t\torigin.y += static_cast<float>(CaptionSurfacePadding());\n"
     "\t\tconst HRESULT aliasingResult = DrawAliasedCaptionText(\n"
     "\t\t\tThis,\n"
     "\t\t\torigin,\n"
@@ -129,6 +136,164 @@ handler = replace_once(
     "\t);\n"
     "}\n\nHRESULT CaptionTextHandler::MyICompositionGraphicsDevice_CreateDrawingSurface",
     "final aliasing path",
+)
+
+handler = replace_once(
+    handler,
+    "\torigin.x += g_textGlowSize;\n"
+    "\torigin.y += g_textGlowSize;",
+    "\torigin.x += static_cast<float>(CaptionSurfacePadding());\n"
+    "\torigin.y += static_cast<float>(CaptionSurfacePadding());",
+    "caption surface origin padding",
+)
+
+handler = replace_once(
+    handler,
+    "\tif (g_dwriteTextVisual)\n"
+    "\t{\n"
+    "\t\tg_textSizeF = sizePixels;\n"
+    "\t\tsizePixels.Width += g_textGlowSize * 2;\n"
+    "\t\tsizePixels.Height += g_textGlowSize * 2;\n"
+    "\t}",
+    "\tif (g_dwriteTextVisual)\n"
+    "\t{\n"
+    "\t\tg_textSizeF = sizePixels;\n"
+    "\t\tconst int padding = CaptionSurfacePadding();\n"
+    "\t\tsizePixels.Width += padding * 2;\n"
+    "\t\tsizePixels.Height += padding * 2;\n"
+    "\t}",
+    "caption surface size padding",
+)
+
+handler = replace_once(
+    handler,
+    "\tif (g_dwriteTextVisual)\n"
+    "\t{\n"
+    "\t\tvalue.Y -= g_textGlowSize;\n"
+    "\t\tvalue.X -= g_textGlowSize;",
+    "\tif (g_dwriteTextVisual)\n"
+    "\t{\n"
+    "\t\tconst int padding = CaptionSurfacePadding();\n"
+    "\t\tvalue.Y -= padding;\n"
+    "\t\tvalue.X -= padding;",
+    "caption brush base padding",
+)
+
+handler = replace_once(
+    handler,
+    "\t\tif (auto& offset = const_cast<POINT&>(g_dwriteTextVisual->GetOffset()); g_dwriteTextVisual->IsRTLMirrored())\n"
+    "\t\t{\n"
+    "\t\t\tif (offset.x > g_textGlowSize)\n"
+    "\t\t\t{\n"
+    "\t\t\t\tvalue.X += g_textGlowSize;\n"
+    "\t\t\t}\n"
+    "\t\t\telse\n"
+    "\t\t\t{\n"
+    "\t\t\t\tvalue.X += g_textGlowSize + g_textGlowSize - offset.x;\n"
+    "\t\t\t}\n"
+    "\t\t}\n"
+    "\t\telse\n"
+    "\t\t{\n"
+    "\t\t\tvalue.X += offset.x - std::max(offset.x - g_textGlowSize, 0l);\n"
+    "\t\t}",
+    "\t\tif (auto& offset = const_cast<POINT&>(g_dwriteTextVisual->GetOffset()); g_dwriteTextVisual->IsRTLMirrored())\n"
+    "\t\t{\n"
+    "\t\t\tif (offset.x > padding)\n"
+    "\t\t\t{\n"
+    "\t\t\t\tvalue.X += padding;\n"
+    "\t\t\t}\n"
+    "\t\t\telse\n"
+    "\t\t\t{\n"
+    "\t\t\t\tvalue.X += padding + padding - offset.x;\n"
+    "\t\t\t}\n"
+    "\t\t}\n"
+    "\t\telse\n"
+    "\t\t{\n"
+    "\t\t\tvalue.X += offset.x - std::max(offset.x - padding, 0l);\n"
+    "\t\t}",
+    "caption brush visual padding",
+)
+
+handler = replace_once(
+    handler,
+    "HRESULT CaptionTextHandler::MyCDWriteText_UpdateOffset(uDWM::CDWriteText* This)\n"
+    "{\n"
+    "\tif (!g_textGlowSize)\n"
+    "\t{\n"
+    "\t\treturn g_CDWriteText_UpdateOffset_Org(This);\n"
+    "\t}\n"
+    "\n"
+    "\t// SpriteVisual will crop what exceeds its bounding rectangle,",
+    "HRESULT CaptionTextHandler::MyCDWriteText_UpdateOffset(uDWM::CDWriteText* This)\n"
+    "{\n"
+    "\tconst int padding = CaptionSurfacePadding();\n"
+    "\n"
+    "\t// SpriteVisual will crop what exceeds its bounding rectangle,",
+    "caption visual offset padding prologue",
+)
+
+handler = replace_once(
+    handler,
+    "\tif (!This->IsRTLMirrored())\n"
+    "\t{\n"
+    "\t\toffset.x = std::max(offset.x - g_textGlowSize, 0l);\n"
+    "\t}",
+    "\tif (!This->IsRTLMirrored())\n"
+    "\t{\n"
+    "\t\toffset.x = std::max(offset.x - padding, 0l);\n"
+    "\t}",
+    "caption visual offset amount",
+)
+
+handler = replace_once(
+    handler,
+    "HRESULT CaptionTextHandler::MyCDWriteText_SetSize(uDWM::CDWriteText* This, const SIZE* size)\n"
+    "{\n"
+    "\tif (!g_textGlowSize)\n"
+    "\t{\n"
+    "\t\treturn g_CDWriteText_SetSize_Org(This, size);\n"
+    "\t}\n"
+    "\n"
+    "\tconst auto hr = g_CDWriteText_SetSize_Org(This, size);",
+    "HRESULT CaptionTextHandler::MyCDWriteText_SetSize(uDWM::CDWriteText* This, const SIZE* size)\n"
+    "{\n"
+    "\tconst int padding = CaptionSurfacePadding();\n"
+    "\n"
+    "\tconst auto hr = g_CDWriteText_SetSize_Org(This, size);",
+    "caption visual size padding prologue",
+)
+
+handler = replace_once(
+    handler,
+    "\tif (This->IsRTLMirrored())\n"
+    "\t{\n"
+    "\t\tThis->GetVisualProxy()->SetSize(\n"
+    "\t\t\tstatic_cast<double>(size->cx + offset.x - std::max(offset.x - g_textGlowSize, 0l)),\n"
+    "\t\t\tstatic_cast<double>(size->cy)\n"
+    "\t\t);\n"
+    "\t}\n"
+    "\telse\n"
+    "\t{\n"
+    "\t\tThis->GetVisualProxy()->SetSize(\n"
+    "\t\t\tstatic_cast<double>(size->cx + offset.x - std::max(offset.x - g_textGlowSize, 0l) + g_textGlowSize),\n"
+    "\t\t\tstatic_cast<double>(size->cy)\n"
+    "\t\t);\n"
+    "\t}",
+    "\tif (This->IsRTLMirrored())\n"
+    "\t{\n"
+    "\t\tThis->GetVisualProxy()->SetSize(\n"
+    "\t\t\tstatic_cast<double>(size->cx + offset.x - std::max(offset.x - padding, 0l)),\n"
+    "\t\t\tstatic_cast<double>(size->cy)\n"
+    "\t\t);\n"
+    "\t}\n"
+    "\telse\n"
+    "\t{\n"
+    "\t\tThis->GetVisualProxy()->SetSize(\n"
+    "\t\t\tstatic_cast<double>(size->cx + offset.x - std::max(offset.x - padding, 0l) + padding),\n"
+    "\t\t\tstatic_cast<double>(size->cy)\n"
+    "\t\t);\n"
+    "\t}",
+    "caption visual size amount",
 )
 
 handler = replace_once(
