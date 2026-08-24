@@ -166,6 +166,16 @@ namespace OpenGlass::CaptionTextHandler
 	int g_textGlowSize{};
 	int g_textGlowIntensity{};
 	int g_centerCaption{ 0 };
+	int g_captionTextAliasing{ 0 };
+	int g_captionTextContrast{ 1 };
+
+#include "CaptionTextRasterizer.inl"
+
+	int CaptionSurfacePadding() noexcept
+	{
+		return std::max(g_textGlowSize, 1);
+	}
+
 	int CaptionCenterOffset(double visualWidth, double textWidth, double visualX, double parentWidth, double scale)
 	{
 		const int localOffset = std::max(
@@ -591,6 +601,19 @@ void CaptionTextHandler::MyID2D1DeviceContext_DrawTextLayout(
 
 	if (!g_textGlowSize)
 	{
+		origin.x += static_cast<float>(CaptionSurfacePadding());
+		origin.y += static_cast<float>(CaptionSurfacePadding());
+		const HRESULT aliasingResult = DrawAliasedCaptionText(
+			This,
+			origin,
+			textLayout,
+			solidColorBrush.get()
+		);
+		if (aliasingResult == S_OK)
+		{
+			return;
+		}
+		LOG_IF_FAILED(aliasingResult);
 		return g_ID2D1DeviceContext_DrawTextLayout_Org(
 			This,
 			origin,
@@ -600,8 +623,8 @@ void CaptionTextHandler::MyID2D1DeviceContext_DrawTextLayout(
 		);
 	}
 
-	origin.x += g_textGlowSize;
-	origin.y += g_textGlowSize;
+	origin.x += static_cast<float>(CaptionSurfacePadding());
+	origin.y += static_cast<float>(CaptionSurfacePadding());
 
 	DWRITE_TEXT_METRICS metrics{};
 	THROW_IF_FAILED(
@@ -715,13 +738,24 @@ void CaptionTextHandler::MyID2D1DeviceContext_DrawTextLayout(
 			D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
 			D2D1_COMPOSITE_MODE_SOURCE_COPY
 		);
-		This->DrawImage(
-			bitmap.get(),
-			&origin,
-			nullptr,
-			D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR
+		const HRESULT aliasingResult = DrawAliasedCaptionText(
+			This,
+			origin,
+			textLayout,
+			solidColorBrush.get()
 		);
-		return;
+		if (aliasingResult == S_OK)
+		{
+			return;
+		}
+		LOG_IF_FAILED(aliasingResult);
+		return g_ID2D1DeviceContext_DrawTextLayout_Org(
+			This,
+			origin,
+			textLayout,
+			defaultFillBrush,
+			options
+		);
 	}
 	if (Shared::g_textGlowMode == 1 || Shared::g_textGlowMode == 2)
 	{
@@ -821,6 +855,17 @@ void CaptionTextHandler::MyID2D1DeviceContext_DrawTextLayout(
 		}*/
 	}
 
+	const HRESULT aliasingResult = DrawAliasedCaptionText(
+		This,
+		origin,
+		textLayout,
+		solidColorBrush.get()
+	);
+	if (aliasingResult == S_OK)
+	{
+		return;
+	}
+	LOG_IF_FAILED(aliasingResult);
 	return g_ID2D1DeviceContext_DrawTextLayout_Org(
 		This,
 		origin,
@@ -841,8 +886,9 @@ HRESULT CaptionTextHandler::MyICompositionGraphicsDevice_CreateDrawingSurface(
 	if (g_dwriteTextVisual)
 	{
 		g_textSizeF = sizePixels;
-		sizePixels.Width += g_textGlowSize * 2;
-		sizePixels.Height += g_textGlowSize * 2;
+		const int padding = CaptionSurfacePadding();
+		sizePixels.Width += padding * 2;
+		sizePixels.Height += padding * 2;
 	}
 	return g_ICompositionGraphicsDevice_CreateDrawingSurface_Org(
 		This,
@@ -860,8 +906,9 @@ HRESULT CaptionTextHandler::MyICompositionSurfaceBrush2_put_Offset(
 {
 	if (g_dwriteTextVisual)
 	{
-		value.Y -= g_textGlowSize;
-		value.X -= g_textGlowSize;
+		const int padding = CaptionSurfacePadding();
+		value.Y -= padding;
+		value.X -= padding;
 
 		// offset, glowSize
 		// 40, 17
@@ -869,18 +916,18 @@ HRESULT CaptionTextHandler::MyICompositionSurfaceBrush2_put_Offset(
 		// CDWriteVisual is rtl mirrored, but CSpriteVisual is not rtl mirrored
 		if (auto& offset = const_cast<POINT&>(g_dwriteTextVisual->GetOffset()); g_dwriteTextVisual->IsRTLMirrored())
 		{
-			if (offset.x > g_textGlowSize)
+			if (offset.x > padding)
 			{
-				value.X += g_textGlowSize;
+				value.X += padding;
 			}
 			else
 			{
-				value.X += g_textGlowSize + g_textGlowSize - offset.x;
+				value.X += padding + padding - offset.x;
 			}
 		}
 		else
 		{
-			value.X += offset.x - std::max(offset.x - g_textGlowSize, 0l);
+			value.X += offset.x - std::max(offset.x - padding, 0l);
 		}
 
 		// Apply the same CenterCaption offset to the DWrite composition surface.
@@ -962,10 +1009,7 @@ HRESULT CaptionTextHandler::MyCDWriteText_ValidateVisual(uDWM::CDWriteText* This
 
 HRESULT CaptionTextHandler::MyCDWriteText_UpdateOffset(uDWM::CDWriteText* This)
 {
-	if (!g_textGlowSize)
-	{
-		return g_CDWriteText_UpdateOffset_Org(This);
-	}
+	const int padding = CaptionSurfacePadding();
 
 	// SpriteVisual will crop what exceeds its bounding rectangle,
 	// here we make it offset x minus the size of the glow,
@@ -976,7 +1020,7 @@ HRESULT CaptionTextHandler::MyCDWriteText_UpdateOffset(uDWM::CDWriteText* This)
 	const auto actualOffsetX = offset.x;
 	if (!This->IsRTLMirrored())
 	{
-		offset.x = std::max(offset.x - g_textGlowSize, 0l);
+		offset.x = std::max(offset.x - padding, 0l);
 	}
 	const auto hr = g_CDWriteText_UpdateOffset_Org(This);
 	offset.x = actualOffsetX;
@@ -986,10 +1030,7 @@ HRESULT CaptionTextHandler::MyCDWriteText_UpdateOffset(uDWM::CDWriteText* This)
 
 HRESULT CaptionTextHandler::MyCDWriteText_SetSize(uDWM::CDWriteText* This, const SIZE* size)
 {
-	if (!g_textGlowSize)
-	{
-		return g_CDWriteText_SetSize_Org(This, size);
-	}
+	const int padding = CaptionSurfacePadding();
 
 	const auto hr = g_CDWriteText_SetSize_Org(This, size);
 	// SpriteVisual will crop what exceeds its bounding rectangle,
@@ -998,14 +1039,14 @@ HRESULT CaptionTextHandler::MyCDWriteText_SetSize(uDWM::CDWriteText* This, const
 	if (This->IsRTLMirrored())
 	{
 		This->GetVisualProxy()->SetSize(
-			static_cast<double>(size->cx + offset.x - std::max(offset.x - g_textGlowSize, 0l)),
+			static_cast<double>(size->cx + offset.x - std::max(offset.x - padding, 0l)),
 			static_cast<double>(size->cy)
 		);
 	}
 	else
 	{
 		This->GetVisualProxy()->SetSize(
-			static_cast<double>(size->cx + offset.x - std::max(offset.x - g_textGlowSize, 0l) + g_textGlowSize),
+			static_cast<double>(size->cx + offset.x - std::max(offset.x - padding, 0l) + padding),
 			static_cast<double>(size->cy)
 		);
 	}
@@ -1086,6 +1127,7 @@ void CaptionTextHandler::CalculateRealizedTextGlowParams(int textGlowMode)
 
 void CaptionTextHandler::DestroyDeviceResources()
 {
+	ResetAliasedCaptionTextResources();
 	g_textGlowRT = nullptr;
 	g_textGlowD2DBitmap = nullptr;
 
@@ -1106,6 +1148,33 @@ void CaptionTextHandler::Update(GlassEngine::UpdateType type)
 	}
 	if (type & GlassEngine::UpdateType::Backdrop || type & GlassEngine::UpdateType::Theme)
 	{
+		const int previousAliasing = g_captionTextAliasing;
+		const int previousContrast = g_captionTextContrast;
+		g_captionTextAliasing = std::clamp(
+			static_cast<int>(GlassEngine::GetDwordFromRegistry(L"CaptionTextAliasing", 0)),
+			0,
+			1
+		);
+		g_captionTextContrast = std::clamp(
+			static_cast<int>(GlassEngine::GetDwordFromRegistry(L"CaptionTextContrast", 1)),
+			0,
+			6
+		);
+		if (
+			uDWM::g_versionInfo.build >= os::build_w11_22h2 &&
+			(previousAliasing != g_captionTextAliasing || previousContrast != g_captionTextContrast)
+		)
+		{
+			ResetAliasedCaptionTextResources();
+			for (const auto& [visual, state] : g_textVisualStateMap)
+			{
+				if (visual && state)
+				{
+					visual->SetDirtyFlags(0x2);
+				}
+			}
+		}
+
 		g_centerCaption = std::clamp(static_cast<int>(GlassEngine::GetDwordFromRegistry(L"CenterCaption", FALSE)), 0, 2);
 		g_captionActiveColor = GlassEngine::GetDwordFromRegistry(L"ColorizationColorCaption", 0xFFFFFFFD);
 		g_captionInactiveColor = GlassEngine::GetDwordFromRegistry(L"ColorizationColorCaptionInactive", g_captionActiveColor);
