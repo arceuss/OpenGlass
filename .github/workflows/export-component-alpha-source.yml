@@ -1,0 +1,31 @@
+name: Export component-alpha work source
+
+on:
+  push:
+    branches:
+      - work/25h2-component-alpha
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Archive source
+        run: |
+          git archive --format=zip --output=OpenGlass-component-alpha-source.zip HEAD
+
+      - name: Upload source
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenGlass-component-alpha-source-${{ github.run_id }}
+          path: OpenGlass-component-alpha-source.zip
+          if-no-files-found: error
+          retention-days: 7
