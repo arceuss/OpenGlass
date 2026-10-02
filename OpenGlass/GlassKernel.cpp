@@ -689,9 +689,9 @@ D2D1_COLOR_F GlassKernel::CRealizedGlassColorizationParameters::GetEffectivescRG
 			const auto alpha = std::max(1.f - blurBalance, 0.1f);
 			effectiveBlendColor =
 			{
-				std::clamp((scRGBColor.r * colorBalance + scRGBAfterglow.r * afterglowBalance * 0.6f) / alpha, 0.f, 1.f),
-				std::clamp((scRGBColor.g * colorBalance + scRGBAfterglow.g * afterglowBalance * 0.6f) / alpha, 0.f, 1.f),
-				std::clamp((scRGBColor.b * colorBalance + scRGBAfterglow.b * afterglowBalance * 0.6f) / alpha, 0.f, 1.f),
+				std::clamp(scRGBColor.r * colorBalance + scRGBAfterglow.r * afterglowBalance * 0.6f, 0.f, 1.f),
+				std::clamp(scRGBColor.g * colorBalance + scRGBAfterglow.g * afterglowBalance * 0.6f, 0.f, 1.f),
+				std::clamp(scRGBColor.b * colorBalance + scRGBAfterglow.b * afterglowBalance * 0.6f, 0.f, 1.f),
 				alpha
 			};
 		}
