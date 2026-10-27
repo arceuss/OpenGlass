@@ -6,8 +6,36 @@
 
 using namespace OpenGlass;
 
+// a theme strip is two frames, active over inactive, already premultiplied. same split the png path does.
+static HRESULT CreateBitmapsFromStrip(
+	ID2D1DeviceContext* context,
+	const Shared::HighlightStrip& strip,
+	winrt::com_ptr<ID2D1Bitmap1>& active,
+	winrt::com_ptr<ID2D1Bitmap1>& inactive
+)
+{
+	const auto properties = D2D1::BitmapProperties1(
+		D2D1_BITMAP_OPTIONS_NONE,
+		D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)
+	);
+	const UINT pitch = strip.width * 4;
+	RETURN_IF_FAILED(context->CreateBitmap(D2D1::SizeU(strip.width, strip.frameHeight), strip.pixels.data(), pitch, properties, active.put()));
+	RETURN_IF_FAILED(context->CreateBitmap(D2D1::SizeU(strip.width, strip.frameHeight), strip.pixels.data() + static_cast<size_t>(pitch) * strip.frameHeight, pitch, properties, inactive.put()));
+	return S_OK;
+}
+
 HRESULT CHighlightRealizer::LoadTexture(ID2D1DeviceContext* context)
 {
+	if (Shared::g_highlightStyle == Shared::HighlightStyle::Msstyles)
+	{
+		// no corner part in the theme: fall through to the win7 art below.
+		const auto assets = Shared::g_themeHighlightAssets.load();
+		if (assets && !assets->corner.pixels.empty())
+		{
+			return CreateBitmapsFromStrip(context, assets->corner, m_highlightBitmap, m_highlightBitmapInactive);
+		}
+	}
+
 	winrt::com_ptr<IStream> stream{ nullptr };
 	if (
 		Shared::g_highlightTexturePath.empty() ||
@@ -18,7 +46,7 @@ HRESULT CHighlightRealizer::LoadTexture(ID2D1DeviceContext* context)
 	{
 		LOG_HR_IF_MSG(HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), !Shared::g_highlightTexturePath.empty(), "invalid highlight texture path");
 		std::span<const UCHAR> textureBytes{};
-		RETURN_IF_FAILED(Util::GetResDataView(textureBytes, IDB_HIGHLIGHT, wil::GetModuleInstanceHandle(), L"PNG"));
+		RETURN_IF_FAILED(Util::GetResDataView(textureBytes, Shared::g_highlightStyle == Shared::HighlightStyle::WindowsVista ? IDB_HIGHLIGHT_VISTA : IDB_HIGHLIGHT, wil::GetModuleInstanceHandle(), L"PNG"));
 
 		stream = { SHCreateMemStream(textureBytes.data(), static_cast<UINT>(textureBytes.size_bytes())), winrt::take_ownership_from_abi };
 	}
@@ -104,6 +132,16 @@ HRESULT CHighlightRealizer::LoadTexture(ID2D1DeviceContext* context)
 
 HRESULT CHighlightRealizer::LoadSideTexture(ID2D1DeviceContext* context)
 {
+	m_sizingMargin = Shared::g_sideHighlightSizingMargin;
+	if (Shared::g_highlightStyle == Shared::HighlightStyle::Msstyles)
+	{
+		const auto assets = Shared::g_themeHighlightAssets.load();
+		if (assets && !assets->side.pixels.empty())
+		{
+			return CreateBitmapsFromStrip(context, assets->side, m_sideHighlightBitmap, m_sideHighlightBitmapInactive);
+		}
+	}
+
 	winrt::com_ptr<IStream> stream{ nullptr };
 	if (
 		Shared::g_sideHighlightTexturePath.empty() ||
@@ -114,6 +152,7 @@ HRESULT CHighlightRealizer::LoadSideTexture(ID2D1DeviceContext* context)
 	{
 		LOG_HR_IF_MSG(HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), !Shared::g_sideHighlightTexturePath.empty(), "invalid side highlight texture path");
 		std::span<const UCHAR> textureBytes{};
+		// vista's side highlight is pixel for pixel win7's, so both styles use this one.
 		RETURN_IF_FAILED(Util::GetResDataView(textureBytes, IDB_SIDEHIGHLIGHT, wil::GetModuleInstanceHandle(), L"PNG"));
 
 		stream = { SHCreateMemStream(textureBytes.data(), static_cast<UINT>(textureBytes.size_bytes())), winrt::take_ownership_from_abi };
@@ -204,6 +243,13 @@ HRESULT CHighlightRealizer::Render(
 	const HighlightContext& highlightContext
 )
 {
+	const auto generation = Shared::g_highlightGeneration.load();
+	if (generation != m_generation)
+	{
+		Reset();
+		m_generation = generation;
+	}
+
 	if (!m_highlightBitmap || !m_highlightBitmapInactive)
 	{
 		RETURN_IF_FAILED(LoadTexture(context));

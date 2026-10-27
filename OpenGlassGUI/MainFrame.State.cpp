@@ -215,6 +215,7 @@ namespace OpenGlass
 		m_chCaptionButtons->SetSelection(std::clamp<int>(m_config->GetDword(L"CaptionButtons", 0), 0, 3));
 		m_chCenterCaption->SetSelection(std::clamp<int>(m_config->GetDword(L"CenterCaption", 0), 0, 2));
 		m_chCaptionTextAliasing->SetSelection(std::clamp<int>(m_config->GetDword(L"CaptionTextAliasing", 0), 0, 1));
+		m_chHighlightStyle->SetSelection(std::clamp<int>(m_config->GetDword(L"HighlightStyle", 0), 0, 2));
 		m_chkDisableModernBorders->SetValue(m_config->GetDword(L"DisableModernBorders", 0) != 0);
 
 		// Colors

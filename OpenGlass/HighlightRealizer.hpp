@@ -24,7 +24,8 @@ namespace OpenGlass
 
 		winrt::com_ptr<ID2D1Bitmap1> m_sideHighlightBitmap{ nullptr };
 		winrt::com_ptr<ID2D1Bitmap1> m_sideHighlightBitmapInactive{ nullptr };
-		int m_sizingMargin{ 2 }; // hardcoded for now!!!
+		int m_sizingMargin{ 2 };
+		UINT m_generation{};
 		inline HRESULT LoadTexture(ID2D1DeviceContext* context);
 		inline HRESULT LoadSideTexture(ID2D1DeviceContext* context);
 	public:

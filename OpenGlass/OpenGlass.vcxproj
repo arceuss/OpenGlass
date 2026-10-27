@@ -155,6 +155,7 @@
   </ItemGroup>
   <ItemGroup>
     <Image Include="highlight.png" />
+    <Image Include="highlight_vista.png" />
     <Image Include="reflection.png" />
     <Image Include="sidehighlight.png" />
   </ItemGroup>

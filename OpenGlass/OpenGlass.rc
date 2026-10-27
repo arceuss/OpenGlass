@@ -31,6 +31,8 @@ IDB_HIGHLIGHT           PNG                     "highlight.png"
 
 IDB_SIDEHIGHLIGHT       PNG                     "sidehighlight.png"
 
+IDB_HIGHLIGHT_VISTA     PNG                     "highlight_vista.png"
+
 
 /////////////////////////////////////////////////////////////////////////////
 //

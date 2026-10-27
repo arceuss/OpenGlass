@@ -28,6 +28,7 @@ namespace OpenGlass::CustomThemeAtlasLoader
 	HRESULT LoadThemeAtlas(LPCWSTR themeAtlasPath);
 	void LoadThemeAtlasLayout(LPCWSTR themeAtlasLayoutPath);
 	HRESULT LoadTextGlowFromThemeAtlas();
+	void LoadHighlights();
 	void LoadTheme(
 		LPCWSTR themeAtlasPath,
 		LPCWSTR themeAtlasLayoutPath
@@ -46,6 +47,7 @@ namespace OpenGlass::CustomThemeAtlasLoader
 	void UnloadTheme()
 	{
 		Shared::g_textGlowBitmap.reset();
+		Shared::g_themeHighlightAssets.store(nullptr);
 
 		g_themeAtlasStream.reset();
 		g_themeAtlasStreamSize = 0;
@@ -435,6 +437,123 @@ HRESULT CustomThemeAtlasLoader::LoadTextGlowFromThemeAtlas()
 	return S_OK;
 }
 
+// windows 7 read the frame highlights from DWMWindow LEFTHIGHLIGHTCORNER (34) and SIDEHIGHLIGHT (43):
+// the atlas rect cut into 2 vertical tiles (active, inactive), OPACITY on the corner and the side and
+// SIZINGMARGINS on the side (uDWM 6.1.7762 CTopLevelWindow::GetNCAreaHelper / CreateBitmapsFromAtlasImageStrip).
+// corner states 3/4 are taken as maximized/inactive maximized, the same mapping the reflection opacity uses.
+// win10 gave 34/43 to other parts, so imported themes carry them as 95/96; LEFTHIGHLIGHTCORNERid / SIDEHIGHLIGHTid
+// override that. uDWM also shaved 1px off every tile, but the win7 art this renderer was tuned with is
+// the full tile, so the tiles stay whole here too.
+static HRESULT CopyHighlightStrip(
+	HTHEME theme,
+	IWICBitmapSource* atlas,
+	int partId,
+	Shared::HighlightStrip& strip
+)
+{
+	RECT rect{};
+	RETURN_IF_FAILED(CustomThemeAtlasLoader::MyGetThemeRect(theme, partId, 0, TMT_ATLASRECT, &rect));
+	UINT atlasWidth{}, atlasHeight{};
+	RETURN_IF_FAILED(atlas->GetSize(&atlasWidth, &atlasHeight));
+	const auto width = wil::rect_width(rect);
+	const auto frameHeight = wil::rect_height(rect) / 2;
+	RETURN_HR_IF(
+		E_INVALIDARG,
+		rect.left < 0 || rect.top < 0 || width <= 0 || frameHeight <= 0 ||
+		static_cast<UINT>(rect.right) > atlasWidth || static_cast<UINT>(rect.bottom) > atlasHeight
+	);
+
+	strip.width = static_cast<UINT>(width);
+	strip.frameHeight = static_cast<UINT>(frameHeight);
+	strip.pixels.resize(static_cast<size_t>(strip.width) * strip.frameHeight * 2 * 4);
+	const WICRect copyRect{ rect.left, rect.top, width, frameHeight * 2 };
+	RETURN_IF_FAILED(atlas->CopyPixels(&copyRect, strip.width * 4, static_cast<UINT>(strip.pixels.size()), strip.pixels.data()));
+	return S_OK;
+}
+
+void CustomThemeAtlasLoader::LoadHighlights()
+{
+	const auto style = static_cast<Shared::HighlightStyle>(std::clamp(GlassEngine::GetDwordFromRegistry(L"HighlightStyle", 0), 0ul, 2ul));
+	Shared::g_highlightStyle = style;
+
+	// windows 7 numbers, what this renderer always used. vista hides the corners on maximized windows.
+	Shared::g_highlightOpacity = style == Shared::HighlightStyle::WindowsVista ?
+		std::array<float, 4>{ .75f, .75f, 0.f, 0.f } :
+		std::array<float, 4>{ .75f, .75f, .75f, .75f };
+	Shared::g_sideHighlightOpacity = { 1.f, .5f };
+	Shared::g_sideHighlightSizingMargin = 2;
+	Shared::g_themeHighlightAssets.store(nullptr);
+
+	if (style == Shared::HighlightStyle::Msstyles && g_themeHandle && g_themeAtlasStreamSize)
+	{
+		const auto cornerId = static_cast<int>(GlassEngine::GetDwordFromRegistry(L"LEFTHIGHLIGHTCORNERid", 95));
+		const auto sideId = static_cast<int>(GlassEngine::GetDwordFromRegistry(L"SIDEHIGHLIGHTid", 96));
+		auto assets = std::make_shared<Shared::HighlightAssets>();
+
+		const auto loadFromAtlas = [&]() -> HRESULT
+		{
+			winrt::com_ptr<IStream> stream{ SHCreateMemStream(g_themeAtlasStream.get(), g_themeAtlasStreamSize), winrt::take_ownership_from_abi };
+			RETURN_HR_IF_NULL(E_OUTOFMEMORY, stream);
+			winrt::com_ptr<IWICImagingFactory> wicFactory{ nullptr };
+			wicFactory.copy_from(uDWM::CDesktopManager::GetInstance()->GetWICFactory());
+			winrt::com_ptr<IWICBitmapDecoder> wicDecoder{ nullptr };
+			RETURN_IF_FAILED(wicFactory->CreateDecoderFromStream(stream.get(), &GUID_VendorMicrosoft, WICDecodeMetadataCacheOnDemand, wicDecoder.put()));
+			winrt::com_ptr<IWICBitmapFrameDecode> wicFrame{ nullptr };
+			RETURN_IF_FAILED(wicDecoder->GetFrame(0, wicFrame.put()));
+			winrt::com_ptr<IWICFormatConverter> wicConverter{ nullptr };
+			RETURN_IF_FAILED(wicFactory->CreateFormatConverter(wicConverter.put()));
+			RETURN_IF_FAILED(wicConverter->Initialize(wicFrame.get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom));
+
+			// a missing or broken part only loses that part: it keeps the windows 7 art and numbers.
+			if (FAILED(CopyHighlightStrip(g_themeHandle.get(), wicConverter.get(), cornerId, assets->corner)))
+			{
+				assets->corner = {};
+			}
+			else
+			{
+				for (int state = 1; state <= 4; state++)
+				{
+					int opacity{};
+					if (SUCCEEDED(MyGetThemeInt(g_themeHandle.get(), cornerId, state, TMT_OPACITY, &opacity)))
+					{
+						Shared::g_highlightOpacity[state - 1] = std::clamp(static_cast<float>(opacity) / 100.f, 0.f, 1.f);
+					}
+				}
+			}
+
+			if (FAILED(CopyHighlightStrip(g_themeHandle.get(), wicConverter.get(), sideId, assets->side)))
+			{
+				assets->side = {};
+			}
+			else
+			{
+				for (int state = 1; state <= 2; state++)
+				{
+					int opacity{};
+					if (SUCCEEDED(MyGetThemeInt(g_themeHandle.get(), sideId, state, TMT_OPACITY, &opacity)))
+					{
+						Shared::g_sideHighlightOpacity[state - 1] = std::clamp(static_cast<float>(opacity) / 100.f, 0.f, 1.f);
+					}
+				}
+				MARGINS margins{};
+				if (SUCCEEDED(MyGetThemeMargins(g_themeHandle.get(), nullptr, sideId, 0, TMT_SIZINGMARGINS, nullptr, &margins)))
+				{
+					Shared::g_sideHighlightSizingMargin = std::clamp(margins.cyBottomHeight, 0, static_cast<int>(assets->side.frameHeight));
+				}
+			}
+			return S_OK;
+		};
+		LOG_IF_FAILED(loadFromAtlas());
+
+		if (!assets->corner.pixels.empty() || !assets->side.pixels.empty())
+		{
+			Shared::g_themeHighlightAssets.store(std::move(assets));
+		}
+	}
+
+	Shared::g_highlightGeneration++;
+}
+
 void CustomThemeAtlasLoader::LoadTheme(LPCWSTR themeAtlasPath, LPCWSTR themeAtlasLayoutPath)
 {
 	g_themeHandle.reset(OpenThemeData(nullptr, L"DWMWindow"));
@@ -464,6 +583,7 @@ void CustomThemeAtlasLoader::Update(GlassEngine::UpdateType type)
 			themeAtlasPath,
 			themeAtlasLayoutPath
 		);
+		LoadHighlights();
 	}
 	if (type & GlassEngine::UpdateType::Backdrop || type & GlassEngine::UpdateType::Theme)
 	{

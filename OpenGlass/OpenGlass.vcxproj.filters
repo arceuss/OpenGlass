@@ -375,6 +375,9 @@
     <Image Include="highlight.png">
       <Filter>Image Files</Filter>
     </Image>
+    <Image Include="highlight_vista.png">
+      <Filter>Image Files</Filter>
+    </Image>
     <Image Include="sidehighlight.png">
       <Filter>Image Files</Filter>
     </Image>

@@ -352,6 +352,17 @@ namespace OpenGlass
 
 		sizer->Add(reflectionGroup, 0, wxEXPAND | wxALL, 2);
 
+		// Highlight Group
+		wxStaticBoxSizer* highlightGroup = new wxStaticBoxSizer(wxVERTICAL, panel, L"Highlights");
+		wxArrayString highlightStyles;
+		highlightStyles.Add(L"Windows 7");
+		highlightStyles.Add(L"Windows Vista");
+		highlightStyles.Add(L"From msstyles");
+		m_chHighlightStyle = new wxChoice(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, highlightStyles);
+		m_chHighlightStyle->SetToolTip(L"Frame corner and side highlights. \"From msstyles\" reads them from the theme (DWMWindow parts 95/96, as kept by msstyleEditor's Windows 7 importer) and falls back to Windows 7 when they're missing.");
+		AddProperty(panel, highlightGroup, L"Highlight style:", m_chHighlightStyle, L"HighlightStyle");
+		sizer->Add(highlightGroup, 0, wxEXPAND | wxALL, 2);
+
 		// Material Group
 		wxStaticBoxSizer* materialGroup = new wxStaticBoxSizer(wxVERTICAL, panel, L"Material");
 

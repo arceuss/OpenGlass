@@ -517,9 +517,10 @@ HRESULT GlassRenderer::MyCDrawingContext_DrawGeometry(
 			else
 			{
 				// highlight goes here
-				// opacity hardcoded for now
-				g_highlightContext.opacity = maximized && Shared::g_type == Shared::GlassType::Blur ? 0.f : .75f;
-				g_highlightContext.sideOpacity = active ? 1.f : .50f;
+				// opacities come from the highlight style (the theme's states 1-4 / 1-2, or the
+				// vista/win7 values); blur keeps hiding the corners on maximized windows like before.
+				g_highlightContext.opacity = maximized && Shared::g_type == Shared::GlassType::Blur ? 0.f : Shared::g_highlightOpacity[(maximized ? 2 : 0) + (active ? 0 : 1)];
+				g_highlightContext.sideOpacity = Shared::g_sideHighlightOpacity[active ? 0 : 1];
 				g_highlightContext.sheetOfGlass = sheetOfGlass;
 				g_highlightContext.active = active;
 				g_highlightContext.worldTransform = matrix;

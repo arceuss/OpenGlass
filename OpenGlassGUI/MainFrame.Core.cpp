@@ -1418,6 +1418,18 @@ namespace OpenGlass
 				updateDword(L"CaptionButtons", sel);
 			}
 		});
+		m_chHighlightStyle->Bind(wxEVT_CHOICE, [this, updateDword, deleteValue]([[maybe_unused]] wxCommandEvent& e) {
+			int sel = e.GetSelection();
+			if (sel == 0)
+			{
+				deleteValue(L"HighlightStyle");
+				NotifySettingsChange(ChangeType::Theme);
+			}
+			else
+			{
+				updateDword(L"HighlightStyle", sel, ChangeType::Theme);
+			}
+		});
 		m_chCenterCaption->Bind(wxEVT_CHOICE, [this, updateDword, deleteValue]([[maybe_unused]] wxCommandEvent& e) {
 			int sel = e.GetSelection();
 			if (sel == 0)
